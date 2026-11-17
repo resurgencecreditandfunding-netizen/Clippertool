@@ -130,3 +130,21 @@ def clip_offsets(clips: list[dict], session_start: datetime) -> list[dict]:
         t = (created - session_start).total_seconds() - c.get("duration", 30) / 2
         out.append({"t": t, "views": c.get("view_count", 0), "title": c.get("title", "")})
     return out
+
+
+_client: Twitch | None = None
+_client_key: tuple[str, str] | None = None
+
+
+def get_client() -> Twitch:
+    """Shared client that picks up credentials changed on the Settings page."""
+    global _client, _client_key
+    key = (settings.twitch_client_id, settings.twitch_client_secret)
+    if _client is None or key != _client_key:
+        _client, _client_key = Twitch(*key), key
+    return _client
+
+
+def reset_client() -> None:
+    global _client, _client_key
+    _client, _client_key = None, None

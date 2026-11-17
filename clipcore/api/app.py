@@ -9,12 +9,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlmodel import func, select
 
+from .. import auth
 from .. import learn as learning
 from .. import rules
 from ..config import settings
@@ -41,15 +42,150 @@ def _bg(key: str, fn, *args) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def _today() -> date:
+    return datetime.now(settings.tz).date()
+
+
+# ---------------------------------------------------------------- login
+OPEN_PATHS = {"/login.html", "/styles.css", "/api/auth/status", "/api/auth/setup", "/api/auth/login"}
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path
+    if path in OPEN_PATHS or auth.valid_token(request.cookies.get(auth.COOKIE)):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "Not logged in"}, status_code=401)
+    return RedirectResponse("/login.html", status_code=303)
+
+
+class PasswordBody(BaseModel):
+    password: str
+
+
+def _session_response(request: Request) -> JSONResponse:
+    resp = JSONResponse({"ok": True})
+    https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+    resp.set_cookie(auth.COOKIE, auth.make_token(), max_age=auth.SESSION_DAYS * 86400,
+                    httponly=True, samesite="strict", secure=https)
+    return resp
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request):
+    return {"setup": auth.is_setup(), "logged_in": auth.valid_token(request.cookies.get(auth.COOKIE))}
+
+
+@app.post("/api/auth/setup")
+def auth_setup(body: PasswordBody, request: Request):
+    if auth.is_setup():
+        raise HTTPException(403, "A password is already set. Log in instead.")
+    try:
+        auth.set_password(body.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _session_response(request)
+
+
+_failed: list[float] = []
+
+
+@app.post("/api/auth/login")
+def auth_login(body: PasswordBody, request: Request):
+    import time
+    now = time.time()
+    _failed[:] = [t for t in _failed if now - t < 600]
+    if len(_failed) >= 10:
+        raise HTTPException(429, "Too many wrong attempts. Wait 10 minutes.")
+    if not auth.check_password(body.password):
+        _failed.append(now)
+        time.sleep(1)
+        raise HTTPException(401, "Wrong password.")
+    return _session_response(request)
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE)
+    return resp
+
+
+class ChangePassword(BaseModel):
+    current: str
+    new: str
+
+
+@app.post("/api/auth/change")
+def auth_change(body: ChangePassword, request: Request):
+    if not auth.check_password(body.current):
+        raise HTTPException(401, "Current password is wrong.")
+    try:
+        auth.set_password(body.new)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _session_response(request)
+
+
+# ---------------------------------------------------------------- settings
+@app.get("/api/settings")
+def get_settings():
+    from ..maintenance import disk_usage
+    from ..config import QUALITY_OPTIONS
+    return {**settings.public(), "disk": disk_usage(), "quality_options": QUALITY_OPTIONS}
+
+
+@app.post("/api/settings")
+def save_settings(body: dict[str, Any]):
+    try:
+        settings.save(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    from ..discovery.twitch import reset_client
+    reset_client()
+    return settings.public()
+
+
+@app.post("/api/settings/test-twitch")
+def test_twitch():
+    if not settings.has_twitch:
+        raise HTTPException(400, "Enter your Client ID and Client Secret first, then Save.")
+    from ..discovery.twitch import TwitchError, get_client
+    try:
+        tw = get_client()
+        tw._auth()
+    except TwitchError as e:
+        msg = str(e)
+        if "auth failed" in msg:
+            msg = "Twitch rejected these keys. Re-copy the Client ID, and generate a New Secret if unsure."
+        raise HTTPException(400, msg)
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Twitch: {e}")
+    try:
+        gid = tw.game_id()
+        live = tw.live_streams(limit=100)
+        return {"ok": True, "message": f"Connected. '{settings.game_name}' has {len(live)} live streams right now.", "game_id": gid}
+    except TwitchError:
+        return {"ok": True, "message": f"Keys work, but Twitch has no category named '{settings.game_name}' yet. "
+                                        "Before launch, test with 'Grand Theft Auto V'."}
+
+
+@app.post("/api/settings/cleanup")
+def cleanup_now():
+    from ..maintenance import cleanup_recordings
+    return cleanup_recordings()
+
+
 # ---------------------------------------------------------------- discovery
 @app.get("/api/discover/live")
 def discover(limit: int = 20, language: Optional[str] = None):
     if not settings.has_twitch:
         raise HTTPException(400, "Add TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET to .env to enable discovery.")
-    from ..discovery.twitch import Twitch
+    from ..discovery.twitch import get_client
     with session_scope() as db:
         tracked = {s.handle for s in db.exec(select(Source).where(Source.active == True)).all()}  # noqa: E712
-    streams = Twitch().live_streams(limit, language)
+    streams = get_client().live_streams(limit, language)
     return [
         {
             "handle": s["user_login"], "display_name": s["user_name"], "viewers": s["viewer_count"],
@@ -214,7 +350,7 @@ def clip_thumb(clip_id: int):
 # ---------------------------------------------------------------- schedule / publish
 @app.post("/api/schedule")
 def schedule(day: Optional[str] = None):
-    d = date.fromisoformat(day) if day else date.today()
+    d = date.fromisoformat(day) if day else _today()
     return {"scheduled": len(schedule_day(d))}
 
 
@@ -225,7 +361,7 @@ def publications(day: Optional[str] = None):
         rows = db.exec(q).all()
         if day:
             d = date.fromisoformat(day)
-            rows = [p for p in rows if p.scheduled_for.astimezone().date() == d]
+            rows = [p for p in rows if p.scheduled_for.astimezone(settings.tz).date() == d]
         clips_ = {c.id: c for c in db.exec(select(Clip)).all()}
         dests = {d.id: d for d in db.exec(select(Destination)).all()}
         sources = {s.id: s for s in db.exec(select(Source)).all()}
@@ -289,7 +425,7 @@ def delete_pub(pub_id: int):
 @app.get("/api/export")
 def export(day: Optional[str] = None):
     """Zip of the day's posts: one folder per account, each post = mp4 + caption.txt."""
-    pubs = publications(day or date.today().isoformat())
+    pubs = publications(day or _today().isoformat())
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
         with session_scope() as db:
@@ -297,13 +433,13 @@ def export(day: Optional[str] = None):
                 c = db.get(Clip, p["clip_id"])
                 if not c or not c.path or not Path(c.path).exists():
                     continue
-                when = p["scheduled_for"].astimezone().strftime("%H%M")
+                when = p["scheduled_for"].astimezone(settings.tz).strftime("%H%M")
                 folder = f"{p['platform']}_{p['account']}".replace("/", "_").replace("@", "")
                 stem = f"{folder}/{when}_clip{c.id}"
                 z.write(c.path, f"{stem}.mp4")
                 z.writestr(f"{stem}.txt", c.caption)
     buf.seek(0)
-    name = f"clipcore_{day or date.today().isoformat()}.zip"
+    name = f"clipcore_{day or _today().isoformat()}.zip"
     return StreamingResponse(buf, media_type="application/zip",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
@@ -311,7 +447,7 @@ def export(day: Optional[str] = None):
 # ---------------------------------------------------------------- stats / analytics
 @app.get("/api/overview/stats")
 def stats():
-    today = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = datetime.now(settings.tz).replace(hour=0, minute=0, second=0, microsecond=0)
     with session_scope() as db:
         clips_ = db.exec(select(Clip)).all()
         pubs = db.exec(select(Publication)).all()
@@ -337,8 +473,14 @@ def stats():
         "sources": len(sources),
         "live_jobs": [{"id": s.id, "status": s.status} for s in sess],
         "transcription": _whisper_available(),
+        "low_disk": _low_disk(),
         "twitch": settings.has_twitch,
     }
+
+
+def _low_disk() -> bool:
+    from ..maintenance import disk_usage
+    return disk_usage()["free_gb"] < settings.min_free_gb
 
 
 def _whisper_available() -> bool:
@@ -438,8 +580,8 @@ def create_item(kind: str, body: dict[str, Any]):
             raise HTTPException(400, "A source must belong to a campaign — that is your permission to clip it.")
         if settings.has_twitch:
             try:
-                from ..discovery.twitch import Twitch
-                u = Twitch().users([body["handle"]]).get(body["handle"])
+                from ..discovery.twitch import get_client
+                u = get_client().users([body["handle"]]).get(body["handle"])
                 if u:
                     body["broadcaster_id"] = u["id"]
                     body["display_name"] = body.get("display_name") or u["display_name"]

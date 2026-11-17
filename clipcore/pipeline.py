@@ -24,9 +24,9 @@ def _viewer_clips(sess: Session, source: Source) -> list[dict]:
         return json.loads(Path(sess.viewer_clips_path).read_text())
     if settings.has_twitch and source.broadcaster_id and sess.ended_at:
         try:
-            from .discovery.twitch import Twitch, clip_offsets
+            from .discovery.twitch import clip_offsets, get_client
 
-            raw = Twitch().clips(source.broadcaster_id, sess.started_at, sess.ended_at)
+            raw = get_client().clips(source.broadcaster_id, sess.started_at, sess.ended_at)
             return clip_offsets(raw, sess.started_at)
         except Exception as e:  # clips are a bonus signal; never fail the run on them
             log.warning("viewer clips unavailable: %s", e)
@@ -114,6 +114,8 @@ def render_clip(clip_id: int, layout: str | None = None) -> Clip:
         source = db.get(Source, clip.source_id)
         campaign = db.get(Campaign, clip.campaign_id) if clip.campaign_id else None
 
+    if not sess.video_path or not Path(sess.video_path).exists():
+        raise ValueError("The original recording for this clip was deleted (storage cleanup), so it can't be re-cut.")
     feats = json.loads(clip.features or "{}")
     words = transcribe.transcribe_window(sess.video_path, clip.start_t, clip.end_t)
     if words is not None:

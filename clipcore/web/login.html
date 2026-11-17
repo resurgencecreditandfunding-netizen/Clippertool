@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClipCore OS · Sign in</title>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    body { display: grid; place-items: center; min-height: 100vh; padding: 16px; }
+    .login { width: min(380px, 100%); }
+    .login .brand { padding: 0 0 18px; }
+    .login p { color: var(--muted); margin: 0 0 16px; line-height: 1.5; }
+    .err { color: var(--bad); min-height: 20px; font-size: 13px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <form class="card login" id="f">
+    <div class="brand"><span class="mark"></span><div><b>ClipCore</b><small>OS</small></div></div>
+    <h2 id="h">Sign in</h2>
+    <p id="intro"></p>
+    <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required autofocus></div>
+    <div class="field" id="confirm-wrap" hidden><label for="pw2">Type it again</label><input id="pw2" type="password" autocomplete="new-password"></div>
+    <button class="btn primary" style="width:100%;padding:11px" id="go">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+  <script>
+    const $ = (s) => document.querySelector(s);
+    let setup = false;
+    fetch("/api/auth/status").then((r) => r.json()).then((s) => {
+      if (s.logged_in) return location.replace("/");
+      setup = !s.setup;
+      if (setup) {
+        $("#h").textContent = "Create your password";
+        $("#intro").textContent = "First time here. Choose a password for this dashboard (at least 10 characters). You'll use it every time you sign in.";
+        $("#confirm-wrap").hidden = false;
+        $("#pw").autocomplete = "new-password";
+        $("#go").textContent = "Create password";
+      }
+    });
+    $("#f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("#err").textContent = "";
+      const password = $("#pw").value;
+      if (setup && password !== $("#pw2").value) { $("#err").textContent = "The two passwords don't match."; return; }
+      $("#go").disabled = true;
+      const r = await fetch(setup ? "/api/auth/setup" : "/api/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }),
+      });
+      $("#go").disabled = false;
+      if (r.ok) return location.replace(setup ? "/#settings" : "/");
+      try { $("#err").textContent = (await r.json()).detail; } catch { $("#err").textContent = "Something went wrong."; }
+    });
+  </script>
+</body>
+</html>

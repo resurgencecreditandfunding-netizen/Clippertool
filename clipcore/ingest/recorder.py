@@ -46,7 +46,7 @@ def record_live(source_id: int, title: str = "", stop: threading.Event | None = 
 
     cmd = [
         "streamlink", "--retry-open", "3", "--hls-live-restart",
-        f"https://twitch.tv/{handle}", "best", "-o", sess.video_path, "--force",
+        f"https://twitch.tv/{handle}", settings.record_quality, "-o", sess.video_path, "--force",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     t0 = time.time()

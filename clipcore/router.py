@@ -27,8 +27,8 @@ def _campaign_ok(dest: Destination, campaign_id: int | None) -> bool:
 
 
 def schedule_day(day: date) -> list[Publication]:
-    window_start = datetime.combine(day, time(settings.post_window_start)).astimezone()
-    window_end = datetime.combine(day, time(min(settings.post_window_end, 23), 59)).astimezone()
+    window_start = datetime.combine(day, time(settings.post_window_start), tzinfo=settings.tz)
+    window_end = datetime.combine(day, time(min(settings.post_window_end, 23), 59), tzinfo=settings.tz)
     created: list[Publication] = []
 
     with session_scope() as db:
@@ -96,7 +96,7 @@ def _platform(dests: list[Destination], dest_id: int) -> str:
 def _next_slot(taken: list[datetime], start: datetime, end: datetime, gap_min: int) -> datetime | None:
     gap = timedelta(minutes=gap_min)
     t = max([start] + [x + gap for x in taken])
-    now = datetime.now().astimezone()
+    now = datetime.now(settings.tz)
     if t < now:
         t = now.replace(second=0, microsecond=0) + timedelta(minutes=5)
     return t if t <= end else None

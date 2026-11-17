@@ -11,6 +11,7 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body && typeof opts.body !== "string" ? JSON.stringify(opts.body) : opts.body,
   });
+  if (res.status === 401) { location.replace("/login.html"); throw new Error("Signed out"); }
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).detail || msg; } catch {}
@@ -45,10 +46,11 @@ async function refreshStats() {
     ].map(([k, v]) => `<div class="kpi"><small>${k}</small><b>${v}</b></div>`).join("");
     const jobs = s.live_jobs.length ? `${s.live_jobs.length} job(s) running` : "idle";
     $("#status-foot").innerHTML = `
-      <div><span class="dot ${s.twitch ? "on" : "off"}"></span>Twitch ${s.twitch ? "connected" : "not configured"}</div>
+      <div><span class="dot ${s.twitch ? "on" : "off"}"></span>${s.twitch ? "Twitch keys set" : '<a href="#settings" onclick="go(\'settings\')">Add Twitch keys →</a>'}</div>
       <div><span class="dot ${s.transcription ? "on" : "off"}"></span>Captions ${s.transcription ? "on" : "off"}</div>
       <div><span class="dot ${s.live_jobs.length ? "on" : ""}"></span>${jobs}</div>
-      <div>${fmt(s.sources)} active sources</div>`;
+      <div>${fmt(s.sources)} active sources</div>
+      ${s.low_disk ? '<div style="color:var(--bad)">⚠ Disk almost full: recording paused. <a href="#settings" onclick="go(\'settings\')">Free space</a></div>' : ""}`;
   } catch (e) { /* server restarting */ }
 }
 
@@ -473,9 +475,105 @@ async function viewAnalytics() {
   };
 }
 
+/* ------------------------------------------------------------ settings */
+const TIMEZONES = ["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles",
+  "America/Anchorage", "Pacific/Honolulu", "America/Toronto", "Europe/London", "Europe/Berlin", "Australia/Sydney", "UTC"];
+
+async function viewSettings() {
+  const s = await api("/api/settings");
+  const d = s.disk;
+  const tzs = TIMEZONES.includes(s.timezone) ? TIMEZONES : [s.timezone, ...TIMEZONES];
+  const hours = (sel) => Array.from({ length: 24 }, (_, h) =>
+    `<option value="${h}" ${h === sel ? "selected" : ""}>${new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: "numeric" })}</option>`).join("");
+  $("#view").innerHTML = `
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(min(440px,100%),1fr))">
+    <div class="card">
+      <h2>1 · Twitch connection</h2>
+      <p class="note">From <b>dev.twitch.tv/console</b> → Applications → Manage your app. Paste both values and click Save. The secret is stored on this server only and is never shown again.</p>
+      <div class="field"><label>Client ID</label><input id="cid" value="${esc(s.twitch_client_id)}" autocomplete="off" spellcheck="false"></div>
+      <div class="field"><label>Client Secret ${s.twitch_client_secret_set ? '<span class="tag approved" style="margin-left:6px">saved</span>' : ""}</label>
+        <input id="csec" type="password" autocomplete="new-password" spellcheck="false"
+          placeholder="${s.twitch_client_secret_set ? "Saved. Leave blank to keep it, or paste a new one" : "Paste your Client Secret"}"></div>
+      <div class="field"><label>Game category to track</label><input id="game" value="${esc(s.game_name)}">
+        <small class="muted">Before launch day, use <b>Grand Theft Auto V</b> to test. Switch to <b>Grand Theft Auto VI</b> once the category exists.</small></div>
+      <div class="row"><button class="btn primary" id="save-tw">Save</button><button class="btn" id="test-tw">Test connection</button></div>
+      <div id="tw-result" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Posting schedule</h2>
+      <div class="field"><label>Your timezone (posting times use this)</label>
+        <select id="tz">${tzs.map((t) => `<option ${t === s.timezone ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+      <div class="row" style="flex-wrap:nowrap">
+        <div class="field" style="flex:1"><label>First post no earlier than</label><select id="pws">${hours(s.post_window_start)}</select></div>
+        <div class="field" style="flex:1"><label>Last post no later than</label><select id="pwe">${hours(s.post_window_end)}</select></div>
+      </div>
+      <div class="field"><label>Clips to render per hour of stream</label><input id="cph" type="number" step="0.5" min="0.5" max="10" value="${s.clips_per_hour}">
+        <small class="muted">1.5 is a good start. Higher means more to review, and more lower-quality clips.</small></div>
+      <button class="btn primary" id="save-sched">Save</button>
+    </div>
+
+    <div class="card">
+      <h2>3 · Storage</h2>
+      <p class="note">Recordings are huge (3–6 GB per stream hour). After a stream is processed, its recording is deleted once this many days have passed. Your rendered clips are kept.</p>
+      <table>
+        <tr><td>Recordings</td><td class="num">${d.recordings_gb} GB</td></tr>
+        <tr><td>Clips</td><td class="num">${d.clips_gb} GB</td></tr>
+        <tr><td>Free space on server</td><td class="num"><b style="color:${d.free_gb < 50 ? "var(--bad)" : "inherit"}">${d.free_gb} GB</b> of ${d.total_gb} GB</td></tr>
+      </table>
+      <div class="field" style="margin-top:12px"><label>Recording quality</label>
+        <select id="rq">${Object.entries(s.quality_options).map(([k, v]) => `<option value="${esc(k)}" ${k === s.record_quality ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></div>
+      <div class="row" style="margin-top:12px">
+        <label class="muted">Keep recordings for</label>
+        <input id="ret" type="number" min="1" max="60" value="${s.retention_days}" style="width:80px"><span class="muted">days</span>
+        <button class="btn primary" id="save-ret">Save</button>
+        <button class="btn" id="clean">Clean up now</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>4 · Account</h2>
+      <div class="field"><label>Current password</label><input id="pw-cur" type="password" autocomplete="current-password"></div>
+      <div class="field"><label>New password (10+ characters)</label><input id="pw-new" type="password" autocomplete="new-password"></div>
+      <div class="row"><button class="btn" id="pw-save">Change password</button><div class="spacer"></div>
+        <button class="btn danger" id="logout">Sign out</button></div>
+    </div>
+  </div>`;
+
+  const save = async (body, msg = "Saved") => {
+    try { await api("/api/settings", { method: "POST", body }); toast(msg); refreshStats(); return true; }
+    catch (e) { toast(e.message, true); return false; }
+  };
+  $("#save-tw").onclick = async () => {
+    if (await save({ twitch_client_id: $("#cid").value, twitch_client_secret: $("#csec").value, game_name: $("#game").value })) viewSettings();
+  };
+  $("#test-tw").onclick = async () => {
+    const box = $("#tw-result");
+    box.innerHTML = '<span class="muted">Testing…</span>';
+    try {
+      const r = await api("/api/settings/test-twitch", { method: "POST" });
+      box.innerHTML = `<div class="caption" style="border-color:var(--accent);color:var(--accent)">✓ ${esc(r.message)}</div>`;
+    } catch (e) { box.innerHTML = `<div class="issues"><div>${esc(e.message)}</div></div>`; }
+  };
+  $("#save-sched").onclick = () => save({ timezone: $("#tz").value, post_window_start: +$("#pws").value,
+    post_window_end: +$("#pwe").value, clips_per_hour: +$("#cph").value });
+  $("#save-ret").onclick = () => save({ retention_days: +$("#ret").value, record_quality: $("#rq").value });
+  $("#clean").onclick = async () => {
+    const r = await api("/api/settings/cleanup", { method: "POST" });
+    toast(`Freed ${r.freed_gb} GB`); viewSettings();
+  };
+  $("#pw-save").onclick = async () => {
+    try {
+      await api("/api/auth/change", { method: "POST", body: { current: $("#pw-cur").value, new: $("#pw-new").value } });
+      toast("Password changed"); $("#pw-cur").value = $("#pw-new").value = "";
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); location.replace("/login.html"); };
+}
+
 const VIEWS = {
   review: viewReview, schedule: viewSchedule, sources: viewSources, campaigns: viewCampaigns,
-  accounts: viewAccounts, sessions: viewSessions, analytics: viewAnalytics,
+  accounts: viewAccounts, sessions: viewSessions, analytics: viewAnalytics, settings: viewSettings,
 };
 
 refreshStats();

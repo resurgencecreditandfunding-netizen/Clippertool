@@ -17,18 +17,28 @@ Campaign B ─ streamer 3 ─┼─► compliance gate → swipe review → rout
                                    views ─── learn ◄──────────────────────── results
 ```
 
-## Quick start
+## Put it on a server (recommended)
+
+**See [DEPLOY.md](DEPLOY.md):** a plain-English, copy-paste guide. One command installs
+everything on an Ubuntu server. You then set your password and Twitch keys in the dashboard's
+**Settings** page. No files to edit.
+
+## Run it locally (developers)
 
 Requires Python 3.11+ and ffmpeg.
 
 ```bash
 pip install -e .
-cp .env.example .env          # add Twitch credentials
 clipcore demo                 # synthetic stream → full pipeline, no Twitch needed
 clipcore serve --watch        # dashboard at http://127.0.0.1:8787 + auto-recording
 ```
 
-Optional captions (word-level, burned in): `pip install -e ".[captions]"`.
+On first visit you create a dashboard password, then add your Twitch keys under **Settings**.
+Environment variables in `.env` (see `.env.example`) still work as defaults; values saved in
+Settings take priority.
+
+Optional captions (word-level, burned in): `pip install -e ".[captions]"`, or install on the
+server with `WITH_CAPTIONS=1`.
 
 ## Daily workflow
 

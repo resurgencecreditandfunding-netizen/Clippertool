@@ -44,9 +44,11 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--top", type=int)
 
     sc = sub.add_parser("schedule", help="route approved clips to accounts for a day")
-    sc.add_argument("--date", default=date.today().isoformat())
+    sc.add_argument("--date", help="YYYY-MM-DD (default: today in your timezone)")
 
     sub.add_parser("learn", help="re-weight detection from posted clip views")
+    sub.add_parser("cleanup", help="delete old recordings past the retention window")
+    sub.add_parser("reset-password", help="clear the dashboard password (set a new one on next visit)")
     sub.add_parser("demo", help="generate a synthetic stream and run the full pipeline")
 
     args = p.parse_args(argv)
@@ -65,13 +67,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.watch:
             from .watcher import watch
             threading.Thread(target=watch, daemon=True).start()
-        uvicorn.run("clipcore.api.app:app", host=args.host, port=args.port, log_level="info")
+        uvicorn.run("clipcore.api.app:app", host=args.host, port=args.port, log_level="info",
+                    proxy_headers=True, forwarded_allow_ips="127.0.0.1")
     elif args.cmd == "discover":
-        from .discovery.twitch import Twitch
-        for s in Twitch().live_streams(args.limit, args.language):
+        from .discovery.twitch import get_client
+        for s in get_client().live_streams(args.limit, args.language):
             print(f"{s['viewer_count']:>7}  {s['user_login']:<24} {s['title'][:70]}")
     elif args.cmd == "add-source":
-        from .discovery.twitch import Twitch
+        from .discovery.twitch import get_client
         from .models import Campaign, Source
         from .config import settings
         with session_scope() as db:
@@ -80,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             src = Source(handle=args.handle.lower(), campaign_id=args.campaign, facecam_box=args.facecam)
             if settings.has_twitch:
-                u = Twitch().users([src.handle]).get(src.handle)
+                u = get_client().users([src.handle]).get(src.handle)
                 if u:
                     src.broadcaster_id, src.display_name = u["id"], u["display_name"]
             db.add(src)
@@ -103,13 +106,22 @@ def main(argv: list[str] | None = None) -> int:
         print("rendered clips:", process_session(args.session_id, args.top))
     elif args.cmd == "schedule":
         from .router import schedule_day
-        pubs = schedule_day(date.fromisoformat(args.date))
+        from .config import settings as _s
+        from datetime import datetime as _dt
+        pubs = schedule_day(date.fromisoformat(args.date) if args.date else _dt.now(_s.tz).date())
         for pub in pubs:
-            print(f"clip {pub.clip_id} → destination {pub.destination_id} at {pub.scheduled_for:%H:%M}")
+            print(f"clip {pub.clip_id} → destination {pub.destination_id} at {pub.scheduled_for.astimezone(_s.tz):%H:%M}")
         print(f"{len(pubs)} posts scheduled")
     elif args.cmd == "learn":
         from .learn import learn
         print(json.dumps(learn(), indent=2))
+    elif args.cmd == "cleanup":
+        from .maintenance import cleanup_recordings
+        print(json.dumps(cleanup_recordings(), indent=2))
+    elif args.cmd == "reset-password":
+        from .config import settings
+        (settings.data_dir / "auth.json").unlink(missing_ok=True)
+        print("Password cleared. Open the dashboard to set a new one.")
     elif args.cmd == "demo":
         from .demo import PLANTED, seed_demo
         from .models import Clip
