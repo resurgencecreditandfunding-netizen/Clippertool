@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClipCore OS</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2312d18e'/><path d='M10 9h12v14H10z' fill='none' stroke='%23051a12' stroke-width='3'/></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <aside class="nav">
+    <div class="brand"><span class="mark"></span><div><b>ClipCore</b><small>OS</small></div></div>
+    <nav>
+      <a data-view="review" class="active">Review <span class="pill" id="nav-pending">0</span></a>
+      <a data-view="schedule">Schedule</a>
+      <a data-view="sources">Sources</a>
+      <a data-view="campaigns">Campaigns</a>
+      <a data-view="accounts">Accounts</a>
+      <a data-view="sessions">Sessions</a>
+      <a data-view="analytics">Analytics</a>
+    </nav>
+    <div class="nav-foot" id="status-foot"></div>
+  </aside>
+
+  <main>
+    <header class="topbar">
+      <h1 id="view-title">Review</h1>
+      <div class="kpis" id="kpis"></div>
+    </header>
+    <section id="view"></section>
+  </main>
+
+  <div id="toast"></div>
+  <dialog id="modal"><form method="dialog" id="modal-form"></form></dialog>
+  <script src="app.js"></script>
+</body>
+</html>
