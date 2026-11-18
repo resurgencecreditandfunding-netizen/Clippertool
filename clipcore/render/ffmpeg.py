@@ -1,7 +1,8 @@
 """9:16 short rendering.
 
 Layouts
-  stacked   facecam on top (40%), gameplay below (60%) — needs Source.facecam_box
+  stacked   webcam on top (40%), gameplay below (60%) — needs a facecam box
+  facecrop  9:16 crop following the face — for full-screen camera streams
   blurfill  zoomed gameplay centred over a blurred fill — works for any stream
 """
 from __future__ import annotations
@@ -33,8 +34,13 @@ def parse_box(box: str) -> tuple[float, float, float, float] | None:
     return x, y, w, h
 
 
-def filtergraph(layout: str, facecam: tuple[float, float, float, float] | None, ass_name: str | None) -> str:
-    if layout == "stacked" and facecam:
+def filtergraph(layout: str, facecam: tuple[float, float, float, float] | None, ass_name: str | None,
+                center_x: float = 0.5) -> str:
+    if layout == "facecrop":
+        cx = min(max(center_x, 0.0), 1.0)
+        g = (f"[0:v]crop=ih*9/16:ih:max(0\\,min(iw-ih*9/16\\,iw*{cx:.4f}-ih*9/32)):0,"
+             f"scale={W}:{H},setsar=1[v0]")
+    elif layout == "stacked" and facecam:
         x, y, w, h = facecam
         game_aspect = W / GAME_H
         g = (
@@ -47,9 +53,9 @@ def filtergraph(layout: str, facecam: tuple[float, float, float, float] | None, 
     else:
         g = (
             f"[0:v]split=2[a][b];"
-            f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-            f"boxblur=24:2,eq=brightness=-0.12,setsar=1[bg];"
-            f"[b]crop=iw*0.78:ih*0.86,scale={W}:-2,setsar=1[fg];"
+            f"[a]scale={W // 4}:{H // 4}:force_original_aspect_ratio=increase,crop={W // 4}:{H // 4},"
+            f"boxblur=8:2,eq=brightness=-0.12,scale={W}:{H},setsar=1[bg];"
+            f"[b]crop=iw*0.72:ih,scale={W}:-2,setsar=1[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2-80[v0]"
         )
     tail = f";[v0]ass={ass_name},fps=30,format=yuv420p[v]" if ass_name else ";[v0]fps=30,format=yuv420p[v]"
@@ -64,6 +70,7 @@ def render_short(
     layout: str = "blurfill",
     facecam_box: str = "",
     ass_path: Path | None = None,
+    center_x: float = 0.5,
 ) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "short.mp4"
@@ -71,7 +78,7 @@ def render_short(
     box = parse_box(facecam_box)
     if layout == "stacked" and not box:
         layout = "blurfill"
-    graph = filtergraph(layout, box, ass_path.name if ass_path else None)
+    graph = filtergraph(layout, box, ass_path.name if ass_path else None, center_x)
     cmd = [
         "ffmpeg", "-v", "error", "-y",
         "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(Path(video_path).resolve()),

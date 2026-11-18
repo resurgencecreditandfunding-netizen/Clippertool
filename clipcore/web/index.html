@@ -3,36 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ClipCore OS</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2312d18e'/><path d='M10 9h12v14H10z' fill='none' stroke='%23051a12' stroke-width='3'/></svg>">
+  <title>ClipCore</title>
+  <link rel="icon" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <aside class="nav">
-    <div class="brand"><span class="mark"></span><div><b>ClipCore</b><small>OS</small></div></div>
+  <header class="top">
+    <a class="brand" href="#"><span class="mark"></span>ClipCore <small>OS</small></a>
     <nav>
-      <a data-view="review" class="active">Review <span class="pill" id="nav-pending">0</span></a>
-      <a data-view="schedule">Schedule</a>
-      <a data-view="sources">Sources</a>
-      <a data-view="campaigns">Campaigns</a>
-      <a data-view="accounts">Accounts</a>
-      <a data-view="sessions">Sessions</a>
-      <a data-view="analytics">Analytics</a>
-      <a data-view="settings">Settings</a>
+      <a class="btn ghost" href="#">My clips</a>
+      <a class="btn ghost" href="#admin" id="admin-link" hidden>Admin</a>
+      <div class="menu" id="menu">
+        <button class="btn ghost" id="menu-btn" aria-label="Account">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>
+        </button>
+        <div class="pop">
+          <div class="who" id="who"></div>
+          <button id="pw-open">Change password</button>
+          <button id="logout">Sign out</button>
+        </div>
+      </div>
     </nav>
-    <div class="nav-foot" id="status-foot"></div>
-  </aside>
-
-  <main>
-    <header class="topbar">
-      <h1 id="view-title">Review</h1>
-      <div class="kpis" id="kpis"></div>
-    </header>
-    <section id="view"></section>
-  </main>
-
+  </header>
+  <main class="wrap" id="view"></main>
+  <dialog id="modal"></dialog>
   <div id="toast"></div>
-  <dialog id="modal"><form method="dialog" id="modal-form"></form></dialog>
   <script src="app.js"></script>
 </body>
 </html>

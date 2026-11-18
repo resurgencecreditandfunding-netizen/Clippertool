@@ -26,13 +26,12 @@ die() { printf '\n\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 # Remember settings between runs so updates keep the domain.
 [ -f "$CONF" ] && . "$CONF"
 DOMAIN="${DOMAIN:-${SAVED_DOMAIN:-}}"
-WITH_CAPTIONS="${WITH_CAPTIONS:-${SAVED_WITH_CAPTIONS:-0}}"
 cat > "$CONF" <<EOF
 SAVED_DOMAIN="$DOMAIN"
-SAVED_WITH_CAPTIONS="$WITH_CAPTIONS"
 EOF
 
 say "Installing system packages (Python, ffmpeg, git, web server)…"
+command -v sudo >/dev/null || apt-get install -y -qq sudo >/dev/null
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip ffmpeg git curl ufw fonts-dejavu-core >/dev/null
@@ -71,9 +70,16 @@ say "Installing ClipCore OS (this takes a minute)…"
 [ -d "$APP_DIR/.venv" ] || python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -q "$APP_DIR"
-if [ "$WITH_CAPTIONS" = "1" ]; then
-  "$APP_DIR/.venv/bin/pip" install -q "$APP_DIR[captions]" || echo "Captions package failed to install; continuing without captions."
-fi
+"$APP_DIR/.venv/bin/pip" install -q --upgrade yt-dlp
+
+say "Downloading the caption model (one time, ~500 MB)…"
+sudo -u clipcore env HOME="$DATA_DIR" CLIPCORE_DATA_DIR="$DATA_DIR" "$APP_DIR/.venv/bin/clipcore" preload \
+  || echo "Caption model will download on the first job instead."
+
+# Video sites change often; keep the downloader current (restart happens at a quiet hour).
+cat > /etc/cron.d/clipcore-update <<EOF
+17 9 * * * root $APP_DIR/.venv/bin/pip install -q --upgrade yt-dlp && systemctl restart clipcore
+EOF
 
 say "Setting up the background service…"
 cat > /etc/systemd/system/clipcore.service <<EOF
@@ -88,7 +94,7 @@ Group=clipcore
 Environment=CLIPCORE_DATA_DIR=$DATA_DIR
 Environment=HOME=$DATA_DIR
 WorkingDirectory=$DATA_DIR
-ExecStart=$APP_DIR/.venv/bin/clipcore serve --watch --host 127.0.0.1 --port 8787
+ExecStart=$APP_DIR/.venv/bin/clipcore serve --host 127.0.0.1 --port 8787
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
@@ -131,13 +137,14 @@ cat <<EOF
 
   Open:  $URL
 
-  1. Create your dashboard password (first visit only)
-  2. Go to Settings and paste your Twitch Client ID + Secret
-  3. Click "Test connection"
+  1. Create the first account. It becomes the admin.
+  2. Admin page: paste your Twitch Client ID + Secret (optional,
+     but it makes Twitch clip ranking much better)
+  3. Paste a VOD link and get clips
 
   Update later:  run the same install command again
   Logs:          journalctl -u clipcore -f
-  Forgot password:  sudo -u clipcore CLIPCORE_DATA_DIR=$DATA_DIR $APP_DIR/.venv/bin/clipcore reset-password
+  Forgot password:  sudo -u clipcore CLIPCORE_DATA_DIR=$DATA_DIR $APP_DIR/.venv/bin/clipcore reset-password EMAIL NEWPASSWORD
 ────────────────────────────────────────────────────────────
 EOF
 if [ -z "$DOMAIN" ]; then

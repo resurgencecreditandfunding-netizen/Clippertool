@@ -12,7 +12,10 @@ def _ts(t: float) -> str:
 
 
 def _esc(text: str) -> str:
-    return text.replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ")
+    # Burned-in text can't render colour emoji (they'd show as empty boxes), so drop them.
+    text = "".join(ch for ch in text if ord(ch) < 0x2190 or 0x2200 <= ord(ch) < 0x2300)
+    text = " ".join(text.split())
+    return text.replace("\\", "").replace("{", "(").replace("}", ")")
 
 
 def build_ass(
@@ -32,7 +35,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Hook,{font},64,&H00FFFFFF,&H00FFFFFF,&H00000000,&HA0000000,1,0,0,0,100,100,0,0,3,18,0,8,70,70,90,1
+Style: Hook,{font},62,&H00111111,&H00111111,&H00FFFFFF,&H00FFFFFF,1,0,0,0,100,100,0,0,3,16,0,8,80,80,110,1
 Style: Cap,{font},92,&H00FFFFFF,&H0000E5FF,&H00000000,&H64000000,1,0,0,0,100,100,0,0,1,7,3,5,60,60,0,1
 
 [Events]

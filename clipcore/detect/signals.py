@@ -83,7 +83,7 @@ def viewer_clip_series(offsets: list[dict], duration: int, spread: float = 8.0) 
     for c in offsets:
         center = float(c["t"])
         if -30 < center < duration + 30:
-            w = 1.0 + 0.25 * np.log10(1 + c.get("views", 0))
+            w = c.get("weight") or 1.0 + 0.25 * np.log10(1 + c.get("views", 0))
             out += w * np.exp(-0.5 * ((t - center) / spread) ** 2)
     return out
 

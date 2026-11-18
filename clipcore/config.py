@@ -1,7 +1,7 @@
 """Runtime settings.
 
 Priority (highest first):
-  1. values saved from the dashboard's Settings page  (data/settings.json)
+  1. values saved from the admin Settings page  (data/settings.json)
   2. environment variables / .env file
   3. built-in defaults
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,22 +31,21 @@ _load_dotenv(ROOT / ".env")
 FIELDS: dict[str, tuple[str, type, object]] = {
     "twitch_client_id": ("TWITCH_CLIENT_ID", str, ""),
     "twitch_client_secret": ("TWITCH_CLIENT_SECRET", str, ""),
-    "game_name": ("CLIPCORE_GAME", str, "Grand Theft Auto VI"),
-    "timezone": ("CLIPCORE_TIMEZONE", str, "America/New_York"),
-    "post_window_start": ("CLIPCORE_POST_START", int, 11),
-    "post_window_end": ("CLIPCORE_POST_END", int, 23),
-    "clips_per_hour": ("CLIPCORE_CLIPS_PER_HOUR", float, 1.5),
-    "retention_days": ("CLIPCORE_RETENTION_DAYS", int, 2),
-    "record_quality": ("CLIPCORE_RECORD_QUALITY", str, "1080p60,1080p,best"),
-    "min_free_gb": ("CLIPCORE_MIN_FREE_GB", int, 15),
+    "anthropic_api_key": ("ANTHROPIC_API_KEY", str, ""),         # optional AI clip judge
+    "invite_code": ("CLIPCORE_INVITE_CODE", str, ""),          # blank = open sign-up
+    "max_parallel_jobs": ("CLIPCORE_MAX_PARALLEL_JOBS", int, 2),
+    "jobs_per_user": ("CLIPCORE_JOBS_PER_USER", int, 2),        # running/queued at once
+    "retention_days": ("CLIPCORE_RETENTION_DAYS", int, 7),
+    "max_vod_hours": ("CLIPCORE_MAX_VOD_HOURS", float, 14),
     "whisper_model": ("CLIPCORE_WHISPER_MODEL", str, "small"),
     "font": ("CLIPCORE_FONT", str, "Inter"),
 }
-SECRET_FIELDS = {"twitch_client_secret"}
-# streamlink stream preference lists (first available wins)
-QUALITY_OPTIONS = {
-    "1080p60,1080p,best": "1080p: sharpest Shorts, about 3 GB per stream hour",
-    "720p60,720p,best": "720p: a bit softer, about 1.7 GB per stream hour",
+SECRET_FIELDS = {"twitch_client_secret", "anthropic_api_key"}
+LIMITS = {
+    "max_parallel_jobs": (1, 16),
+    "jobs_per_user": (1, 20),
+    "retention_days": (1, 90),
+    "max_vod_hours": (0.5, 48),
 }
 
 
@@ -56,7 +54,6 @@ class Settings:
         self.data_dir = Path(os.environ.get("CLIPCORE_DATA_DIR", ROOT / "data"))
         self.reload()
 
-    # ------------------------------------------------------------------ load/save
     @property
     def settings_path(self) -> Path:
         return self.data_dir / "settings.json"
@@ -78,7 +75,6 @@ class Settings:
             setattr(self, name, value)
 
     def save(self, updates: dict) -> None:
-        """Validate and persist values from the Settings page."""
         clean: dict = {}
         for name, value in updates.items():
             if name not in FIELDS:
@@ -91,24 +87,13 @@ class Settings:
             try:
                 value = typ(value)
             except (TypeError, ValueError):
-                raise ValueError(f"Invalid value for {name}")
-            if name == "timezone":
-                try:
-                    ZoneInfo(value)
-                except (ZoneInfoNotFoundError, ValueError):
-                    raise ValueError(f"Unknown timezone: {value}")
-            if name in ("post_window_start", "post_window_end") and not 0 <= value <= 23:
-                raise ValueError("Posting hours must be between 0 and 23")
-            if name == "retention_days" and value < 1:
-                raise ValueError("Keep recordings for at least 1 day")
-            if name == "record_quality" and value not in QUALITY_OPTIONS:
-                raise ValueError("Unknown recording quality")
-            if name == "clips_per_hour" and not 0.1 <= value <= 20:
-                raise ValueError("Clips per hour must be between 0.1 and 20")
+                raise ValueError(f"Invalid value for {name.replace('_', ' ')}")
+            if name in LIMITS:
+                lo, hi = LIMITS[name]
+                if not lo <= value <= hi:
+                    raise ValueError(f"{name.replace('_', ' ').capitalize()} must be between {lo} and {hi}")
             clean[name] = value
         merged = {**self._saved(), **clean}
-        if merged.get("post_window_start", self.post_window_start) >= merged.get("post_window_end", self.post_window_end):
-            raise ValueError("Posting window must start before it ends")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.settings_path.write_text(json.dumps(merged, indent=2))
         try:
@@ -118,42 +103,25 @@ class Settings:
         self.reload()
 
     def public(self) -> dict:
-        """Settings for the UI — secrets are never sent back, only whether they're set."""
         out = {name: getattr(self, name) for name in FIELDS if name not in SECRET_FIELDS}
         for name in SECRET_FIELDS:
             out[f"{name}_set"] = bool(getattr(self, name))
         return out
 
-    # ------------------------------------------------------------------ derived
     @property
-    def tz(self) -> ZoneInfo:
-        try:
-            return ZoneInfo(self.timezone)
-        except (ZoneInfoNotFoundError, ValueError):
-            return ZoneInfo("UTC")
-
-    @property
-    def recordings_dir(self) -> Path:
-        return self.data_dir / "recordings"
-
-    @property
-    def clips_dir(self) -> Path:
-        return self.data_dir / "clips"
+    def jobs_dir(self) -> Path:
+        return self.data_dir / "jobs"
 
     @property
     def db_url(self) -> str:
         return f"sqlite:///{self.data_dir / 'clipcore.db'}"
 
     @property
-    def weights_path(self) -> Path:
-        return self.data_dir / "weights.json"
-
-    @property
     def has_twitch(self) -> bool:
         return bool(self.twitch_client_id and self.twitch_client_secret)
 
     def ensure_dirs(self) -> None:
-        for d in (self.data_dir, self.recordings_dir, self.clips_dir):
+        for d in (self.data_dir, self.jobs_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

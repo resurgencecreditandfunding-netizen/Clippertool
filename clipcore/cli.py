@@ -2,54 +2,27 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import sys
-from datetime import date
-
-from sqlmodel import select
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="clipcore", description="ClipCore OS — permission-based GTA 6 clipping engine")
+    p = argparse.ArgumentParser(prog="clipcore", description="ClipCore — paste a stream link, get viral shorts")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init", help="create the database")
-    sv = sub.add_parser("serve", help="run the dashboard + API")
+    sv = sub.add_parser("serve", help="run the web app")
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8787)
-    sv.add_argument("--watch", action="store_true", help="also run the auto-record watcher")
 
-    d = sub.add_parser("discover", help="list live streams of the game on Twitch")
-    d.add_argument("--limit", type=int, default=20)
-    d.add_argument("--language")
+    c = sub.add_parser("clip", help="process one link from the command line (for testing)")
+    c.add_argument("url")
+    c.add_argument("--count", type=int, default=0)
 
-    a = sub.add_parser("add-source", help="add a streamer you have permission to clip")
-    a.add_argument("handle")
-    a.add_argument("--campaign", type=int, required=True, help="campaign id that authorises this streamer")
-    a.add_argument("--facecam", default="", help='facecam box as fractions "x,y,w,h"')
+    r = sub.add_parser("reset-password", help="set a new password for an account")
+    r.add_argument("email")
+    r.add_argument("password")
 
-    r = sub.add_parser("record", help="record one live source now (blocks until stream ends)")
-    r.add_argument("source_id", type=int)
-
-    sub.add_parser("watch", help="auto-record all active sources when they go live")
-
-    im = sub.add_parser("import", help="import a VOD URL or local file as a session")
-    im.add_argument("source_id", type=int)
-    im.add_argument("path_or_url")
-    im.add_argument("--chat", help="chat .jsonl aligned to the video (optional)")
-
-    pr = sub.add_parser("process", help="detect + render clips for a session")
-    pr.add_argument("session_id", type=int)
-    pr.add_argument("--top", type=int)
-
-    sc = sub.add_parser("schedule", help="route approved clips to accounts for a day")
-    sc.add_argument("--date", help="YYYY-MM-DD (default: today in your timezone)")
-
-    sub.add_parser("learn", help="re-weight detection from posted clip views")
-    sub.add_parser("cleanup", help="delete old recordings past the retention window")
-    sub.add_parser("reset-password", help="clear the dashboard password (set a new one on next visit)")
-    sub.add_parser("demo", help="generate a synthetic stream and run the full pipeline")
+    sub.add_parser("cleanup", help="delete projects older than the retention window")
+    sub.add_parser("preload", help="download the caption model ahead of the first job")
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -57,83 +30,46 @@ def main(argv: list[str] | None = None) -> int:
     from .db import init_db, session_scope
     init_db()
 
-    if args.cmd == "init":
-        print("database ready")
-    elif args.cmd == "serve":
-        import threading
-
+    if args.cmd == "serve":
         import uvicorn
-
-        if args.watch:
-            from .watcher import watch
-            threading.Thread(target=watch, daemon=True).start()
         uvicorn.run("clipcore.api.app:app", host=args.host, port=args.port, log_level="info",
                     proxy_headers=True, forwarded_allow_ips="127.0.0.1")
-    elif args.cmd == "discover":
-        from .discovery.twitch import get_client
-        for s in get_client().live_streams(args.limit, args.language):
-            print(f"{s['viewer_count']:>7}  {s['user_login']:<24} {s['title'][:70]}")
-    elif args.cmd == "add-source":
-        from .discovery.twitch import get_client
-        from .models import Campaign, Source
-        from .config import settings
+    elif args.cmd == "clip":
+        from sqlmodel import select
+        from .jobs import run_job
+        from .models import Job, Short, User
         with session_scope() as db:
-            if not db.get(Campaign, args.campaign):
-                print(f"campaign {args.campaign} not found", file=sys.stderr)
+            u = db.exec(select(User)).first()
+            if not u:
+                print("Create an account in the web app first.")
                 return 1
-            src = Source(handle=args.handle.lower(), campaign_id=args.campaign, facecam_box=args.facecam)
-            if settings.has_twitch:
-                u = get_client().users([src.handle]).get(src.handle)
-                if u:
-                    src.broadcaster_id, src.display_name = u["id"], u["display_name"]
-            db.add(src)
+            j = Job(user_id=u.id, url=args.url, clip_count=args.count)
+            db.add(j)
             db.commit()
-            db.refresh(src)
-            print(f"source {src.id}: {src.handle}")
-    elif args.cmd == "record":
-        from .ingest.recorder import record_live
-        from .pipeline import process_session
-        sid = record_live(args.source_id)
-        print("session", sid, "rendered", process_session(sid))
-    elif args.cmd == "watch":
-        from .watcher import watch
-        watch()
-    elif args.cmd == "import":
-        from .ingest.recorder import import_media
-        print("session", import_media(args.source_id, args.path_or_url, args.chat))
-    elif args.cmd == "process":
-        from .pipeline import process_session
-        print("rendered clips:", process_session(args.session_id, args.top))
-    elif args.cmd == "schedule":
-        from .router import schedule_day
-        from .config import settings as _s
-        from datetime import datetime as _dt
-        pubs = schedule_day(date.fromisoformat(args.date) if args.date else _dt.now(_s.tz).date())
-        for pub in pubs:
-            print(f"clip {pub.clip_id} → destination {pub.destination_id} at {pub.scheduled_for.astimezone(_s.tz):%H:%M}")
-        print(f"{len(pubs)} posts scheduled")
-    elif args.cmd == "learn":
-        from .learn import learn
-        print(json.dumps(learn(), indent=2))
-    elif args.cmd == "cleanup":
-        from .maintenance import cleanup_recordings
-        print(json.dumps(cleanup_recordings(), indent=2))
-    elif args.cmd == "reset-password":
-        from .config import settings
-        (settings.data_dir / "auth.json").unlink(missing_ok=True)
-        print("Password cleared. Open the dashboard to set a new one.")
-    elif args.cmd == "demo":
-        from .demo import PLANTED, seed_demo
-        from .models import Clip
-        from .pipeline import process_session
-        sid = seed_demo()
-        process_session(sid)
+            db.refresh(j)
+        run_job(j.id)
         with session_scope() as db:
-            clips = db.exec(select(Clip).where(Clip.session_id == sid).order_by(Clip.score.desc())).all()
-        print(f"\nplanted moments: {[t for t, _ in PLANTED]}")
-        for c in clips:
-            print(f"  clip {c.id}: peak {c.peak_t:>5.0f}s  {c.start_t:.0f}-{c.end_t:.0f}s  score {c.score:>5.1f}  {c.status}")
-        print("\nrun `clipcore serve` and open http://127.0.0.1:8787 to review")
+            j = db.get(Job, j.id)
+            print(f"\n{j.status}: {j.title} ({j.duration / 3600:.1f}h) {j.error}")
+            for s in db.exec(select(Short).where(Short.job_id == j.id).order_by(Short.rank)).all():
+                print(f"  #{s.rank} score {s.score:>5.1f}  {s.start_t:>7.0f}s-{s.end_t:.0f}s  {s.title}  {s.path}")
+    elif args.cmd == "reset-password":
+        from sqlmodel import select
+        from .auth import set_password
+        from .models import User
+        with session_scope() as db:
+            u = db.exec(select(User).where(User.email == args.email.lower())).first()
+        if not u:
+            print("No account with that email.")
+            return 1
+        set_password(u.id, args.password)
+        print("Password updated.")
+    elif args.cmd == "cleanup":
+        from .maintenance import cleanup
+        print(cleanup())
+    elif args.cmd == "preload":
+        from . import transcribe
+        print("caption model ready" if transcribe.available() else "faster-whisper not installed")
     return 0
 
 

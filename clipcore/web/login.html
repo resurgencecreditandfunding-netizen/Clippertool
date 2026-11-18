@@ -3,52 +3,79 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ClipCore OS · Sign in</title>
+  <title>ClipCore · Paste a stream, get the viral clips</title>
+  <meta name="description" content="Paste a Twitch, Kick or YouTube VOD link. ClipCore finds the moments that blew up, cuts them to 9:16 and adds captions, ready to post.">
+  <link rel="icon" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
-  <style>
-    body { display: grid; place-items: center; min-height: 100vh; padding: 16px; }
-    .login { width: min(380px, 100%); }
-    .login .brand { padding: 0 0 18px; }
-    .login p { color: var(--muted); margin: 0 0 16px; line-height: 1.5; }
-    .err { color: var(--bad); min-height: 20px; font-size: 13px; margin-top: 8px; }
-  </style>
 </head>
 <body>
-  <form class="card login" id="f">
-    <div class="brand"><span class="mark"></span><div><b>ClipCore</b><small>OS</small></div></div>
-    <h2 id="h">Sign in</h2>
-    <p id="intro"></p>
-    <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required autofocus></div>
-    <div class="field" id="confirm-wrap" hidden><label for="pw2">Type it again</label><input id="pw2" type="password" autocomplete="new-password"></div>
-    <button class="btn primary" style="width:100%;padding:11px" id="go">Sign in</button>
-    <div class="err" id="err"></div>
-  </form>
+  <div class="landing">
+    <section class="pitch">
+      <a class="brand" href="/login.html"><span class="mark"></span>ClipCore <small>OS</small></a>
+      <h1>Paste a stream. Get the <em>viral clips.</em></h1>
+      <p class="lede">Stop scrubbing 8-hour VODs. ClipCore listens to the whole stream, finds the moments that went off, and hands you finished vertical Shorts with captions.</p>
+      <div class="steps">
+        <div class="step"><span class="n">1</span><div><b>Paste a VOD link</b><p>Twitch, Kick or YouTube. Streams up to 14 hours.</p></div></div>
+        <div class="step"><span class="n">2</span><div><b>It finds the moments</b><p>Screams, hype and the moments viewers already clipped, ranked by viral score.</p></div></div>
+        <div class="step"><span class="n">3</span><div><b>Download ready-to-post Shorts</b><p>9:16, burned-in captions, hook titles. One click or the whole batch as a zip.</p></div></div>
+      </div>
+    </section>
+
+    <section class="authside">
+      <div class="card authcard">
+        <div class="tabs" id="tabs">
+          <button type="button" data-mode="signup" class="on">Create account</button>
+          <button type="button" data-mode="login">Log in</button>
+        </div>
+        <form id="f" novalidate>
+          <h2 id="h">Start clipping</h2>
+          <p class="sub" id="sub">Your first clips are a few minutes away.</p>
+          <div class="field"><label for="email">Email</label><input id="email" type="email" autocomplete="email" required></div>
+          <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="new-password" required minlength="8"></div>
+          <div class="field" id="invite-wrap" hidden><label for="invite">Access code</label><input id="invite" autocomplete="off" spellcheck="false"></div>
+          <button class="btn primary" style="width:100%;padding:13px;font-size:15px" id="go">Create account</button>
+          <div class="err" id="err" style="margin-top:10px"></div>
+          <p class="fine" id="terms">By creating an account you agree to only clip content you have the rights or permission to use.</p>
+        </form>
+      </div>
+    </section>
+  </div>
+
   <script>
     const $ = (s) => document.querySelector(s);
-    let setup = false;
+    let mode = "signup", status = {};
+    function setMode(m) {
+      mode = m;
+      document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.mode === m));
+      const signup = m === "signup";
+      $("#h").textContent = signup ? (status.first_user ? "Create the admin account" : "Start clipping") : "Welcome back";
+      $("#sub").textContent = signup
+        ? (status.first_user ? "This is the first account, so it becomes the admin." : "Your first clips are a few minutes away.")
+        : "Log in to your clips.";
+      $("#go").textContent = signup ? "Create account" : "Log in";
+      $("#pw").autocomplete = signup ? "new-password" : "current-password";
+      $("#invite-wrap").hidden = !(signup && status.invite_required);
+      $("#terms").hidden = !signup;
+      $("#err").textContent = "";
+    }
+    document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
     fetch("/api/auth/status").then((r) => r.json()).then((s) => {
+      status = s;
       if (s.logged_in) return location.replace("/");
-      setup = !s.setup;
-      if (setup) {
-        $("#h").textContent = "Create your password";
-        $("#intro").textContent = "First time here. Choose a password for this dashboard (at least 10 characters). You'll use it every time you sign in.";
-        $("#confirm-wrap").hidden = false;
-        $("#pw").autocomplete = "new-password";
-        $("#go").textContent = "Create password";
-      }
+      setMode(location.hash === "#login" ? "login" : "signup");
     });
     $("#f").addEventListener("submit", async (e) => {
       e.preventDefault();
       $("#err").textContent = "";
-      const password = $("#pw").value;
-      if (setup && password !== $("#pw2").value) { $("#err").textContent = "The two passwords don't match."; return; }
+      const body = { email: $("#email").value, password: $("#pw").value, invite: $("#invite").value };
+      if (!body.email || !body.password) { $("#err").textContent = "Enter your email and password."; return; }
       $("#go").disabled = true;
-      const r = await fetch(setup ? "/api/auth/setup" : "/api/auth/login", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }),
-      });
+      const r = await fetch(mode === "signup" ? "/api/auth/signup" : "/api/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      }).catch(() => null);
       $("#go").disabled = false;
-      if (r.ok) return location.replace(setup ? "/#settings" : "/");
-      try { $("#err").textContent = (await r.json()).detail; } catch { $("#err").textContent = "Something went wrong."; }
+      if (r && r.ok) return location.replace("/");
+      try { $("#err").textContent = (await r.json()).detail; } catch { $("#err").textContent = "Couldn't reach the server. Try again."; }
     });
   </script>
 </body>

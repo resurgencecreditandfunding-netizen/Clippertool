@@ -10,11 +10,13 @@ from . import models  # noqa: F401  (register tables)
 from .config import settings
 
 settings.ensure_dirs()
-engine = create_engine(settings.db_url, connect_args={"check_same_thread": False})
+engine = create_engine(settings.db_url, connect_args={"check_same_thread": False, "timeout": 30})
 
 
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
 
 
 @contextmanager
