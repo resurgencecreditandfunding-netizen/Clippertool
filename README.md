@@ -29,7 +29,9 @@ everything on Ubuntu, including HTTPS when you have a domain.
 
 ## Admin
 
-The first account created is the admin. The **Admin** page has:
+The admin account is created on the server during install (`clipcore create-admin EMAIL`).
+Website sign-ups are always regular users, so nobody can claim admin from the web. The
+**Admin** page has:
 
 - **Access code:** leave it blank for open sign-up, or set one to make the app invite-only.
   Sell access through your existing checkout and send buyers the code.

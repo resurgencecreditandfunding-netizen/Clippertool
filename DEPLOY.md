@@ -27,13 +27,17 @@ Takes about 15 minutes. You don't need to know how to code; you'll copy and past
    curl -fsSL https://raw.githubusercontent.com/resurgencecreditandfunding-netizen/clippertool/main/deploy/install.sh | sudo bash
    ```
 
-3. Wait 5–10 minutes (it also downloads the caption model). When it's done you'll see a box
-   saying **ClipCore OS is running** with your address.
+3. Wait 5–10 minutes (it also downloads the caption model). Near the end it asks you to
+   **create your admin login**: type your email, press Enter, then choose a password
+   (nothing appears on screen while you type it, which is normal), press Enter, and type it
+   again. This is the only account that can open the Admin page. Nobody can become admin
+   from the website.
+4. When it's done you'll see a box saying **ClipCore OS is running** with your address.
 
 ## 3. First login
 
 1. In your browser, go to `http://YOUR-IP-ADDRESS` (the IP from step 1).
-2. **Create the first account** with your own email. The first account is the **admin**.
+2. Click **Log in** and sign in with the admin email and password you set during install.
 3. Click **Admin** (top right):
    - Paste your Twitch **Client ID** and **Client Secret**, click **Save**, then
      **Test connection**. This is optional, but for Twitch links it adds ranking by the clips
@@ -71,7 +75,7 @@ Run the same install command again in the Droplet Console. Accounts, clips and s
 | Page won't load | Wait 2 minutes after install, then check that you typed `http://` and not `https://` (unless you set up a domain). |
 | "Twitch rejected these keys" | Re-copy the Client ID. In the Twitch console, click **New Secret**, paste the new one, and click Save. |
 | A user forgot their password | Admin → Users → **Reset password**, then send them the new one privately. |
-| You forgot the admin password | In the Droplet Console: `sudo -u clipcore CLIPCORE_DATA_DIR=/var/lib/clipcore /opt/clipcore/.venv/bin/clipcore reset-password you@email.com NewPassword123` |
+| You forgot the admin password | In the Droplet Console: `sudo -u clipcore env HOME=/var/lib/clipcore CLIPCORE_DATA_DIR=/var/lib/clipcore /opt/clipcore/.venv/bin/clipcore create-admin you@email.com`, then choose a new password when asked. |
 | YouTube links fail with "YouTube blocked the download" | YouTube often blocks downloads from data-center servers. Twitch and Kick links aren't affected. |
 | Disk filling up | Admin → lower **Keep finished clips for** (days). Old projects are deleted automatically every hour. |
 | See what the server is doing | In the Droplet Console: `journalctl -u clipcore -f` (press Ctrl+C to stop). |

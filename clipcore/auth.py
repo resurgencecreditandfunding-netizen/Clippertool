@@ -1,7 +1,8 @@
 """Accounts: email + password, signed session cookies.
 
-The first account created becomes the admin (that's you). If an invite code is set in
-Settings, sign-up requires it — sell access through your checkout and hand out the code.
+Web sign-ups are always regular users. The admin account is created only on the server itself
+(`clipcore create-admin`, which the installer runs for you), so nobody can claim admin from the
+website. If an access code is set in Admin, sign-up requires it — sell access through your checkout and hand out the code.
 """
 from __future__ import annotations
 
@@ -64,18 +65,41 @@ def signup(email: str, password: str, invite: str = "") -> User:
     if not EMAIL_RE.match(email):
         raise AuthError("Enter a valid email address.")
     _check_password_rules(password)
-    first = user_count() == 0
-    if not first and settings.invite_code and not hmac.compare_digest(invite.strip(), settings.invite_code):
+    if settings.invite_code and not hmac.compare_digest(invite.strip(), settings.invite_code):
         raise AuthError("That access code isn't valid.")
     with session_scope() as db:
         if db.exec(select(User).where(User.email == email)).first():
             raise AuthError("An account with that email already exists. Log in instead.")
         salt = secrets.token_hex(16)
-        user = User(email=email, pw_salt=salt, pw_hash=_hash(password, salt), is_admin=first)
+        user = User(email=email, pw_salt=salt, pw_hash=_hash(password, salt), is_admin=False)
         db.add(user)
         db.commit()
         db.refresh(user)
         return user
+
+
+def create_admin(email: str, password: str) -> User:
+    """Server-side only. Creates the admin, or promotes an existing account and resets its password."""
+    email = email.strip().lower()
+    if not EMAIL_RE.match(email):
+        raise AuthError("Enter a valid email address.")
+    _check_password_rules(password)
+    with session_scope() as db:
+        user = db.exec(select(User).where(User.email == email)).first()
+        salt = secrets.token_hex(16)
+        if user is None:
+            user = User(email=email, pw_salt=salt, pw_hash=_hash(password, salt), is_admin=True)
+        else:
+            user.pw_salt, user.pw_hash, user.is_admin, user.disabled = salt, _hash(password, salt), True, False
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+
+def admin_exists() -> bool:
+    with session_scope() as db:
+        return db.exec(select(User).where(User.is_admin == True)).first() is not None  # noqa: E712
 
 
 def login(email: str, password: str) -> User:

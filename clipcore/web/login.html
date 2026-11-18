@@ -48,10 +48,8 @@
       mode = m;
       document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.mode === m));
       const signup = m === "signup";
-      $("#h").textContent = signup ? (status.first_user ? "Create the admin account" : "Start clipping") : "Welcome back";
-      $("#sub").textContent = signup
-        ? (status.first_user ? "This is the first account, so it becomes the admin." : "Your first clips are a few minutes away.")
-        : "Log in to your clips.";
+      $("#h").textContent = signup ? "Start clipping" : "Welcome back";
+      $("#sub").textContent = signup ? "Your first clips are a few minutes away." : "Log in to your clips.";
       $("#go").textContent = signup ? "Create account" : "Log in";
       $("#pw").autocomplete = signup ? "new-password" : "current-password";
       $("#invite-wrap").hidden = !(signup && status.invite_required);

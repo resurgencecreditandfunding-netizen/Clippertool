@@ -96,9 +96,29 @@ def fresh_db():
 
 
 # ------------------------------------------------------------------ accounts
-def test_first_user_is_admin_and_invite_code(fresh_db):
-    admin = auth.signup("Boss@Example.com", "password-1")
-    assert admin.is_admin and admin.email == "boss@example.com"
+def test_web_signup_never_grants_admin(fresh_db):
+    first = auth.signup("Boss@Example.com", "password-1")
+    assert not first.is_admin and first.email == "boss@example.com"   # even the very first sign-up
+    assert not auth.admin_exists()
+
+
+def test_create_admin_server_side(fresh_db):
+    admin = auth.create_admin("Owner@Example.com", "owner-pass-1")
+    assert admin.is_admin and auth.admin_exists()
+    with pytest.raises(auth.AuthError, match="already exists"):
+        auth.signup("owner@example.com", "attacker-pw-1")              # can't hijack the admin email
+    assert auth.login("owner@example.com", "owner-pass-1").is_admin
+    # Forgot-password path: re-running create-admin resets the password.
+    auth.create_admin("owner@example.com", "new-owner-pass")
+    with pytest.raises(auth.AuthError):
+        auth.login("owner@example.com", "owner-pass-1")
+    assert auth.login("owner@example.com", "new-owner-pass").is_admin
+    # Promoting an existing user works too.
+    u = auth.signup("helper@example.com", "password-1")
+    assert auth.create_admin("helper@example.com", "helper-pass-2").id == u.id
+
+
+def test_access_code(fresh_db):
     settings.save({"invite_code": "GTA6VIP"})
     with pytest.raises(auth.AuthError, match="access code"):
         auth.signup("a@b.co", "password-1", "wrong")

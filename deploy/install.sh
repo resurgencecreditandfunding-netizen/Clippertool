@@ -76,6 +76,25 @@ say "Downloading the caption model (one time, ~500 MB)…"
 sudo -u clipcore env HOME="$DATA_DIR" CLIPCORE_DATA_DIR="$DATA_DIR" "$APP_DIR/.venv/bin/clipcore" preload \
   || echo "Caption model will download on the first job instead."
 
+CC="sudo -u clipcore env HOME=$DATA_DIR CLIPCORE_DATA_DIR=$DATA_DIR $APP_DIR/.venv/bin/clipcore"
+if ! $CC has-admin >/dev/null 2>&1; then
+  say "Create your admin login"
+  echo "  Only this account can open the Admin page. People who sign up on the website"
+  echo "  are always regular users."
+  [ -r /dev/tty ] || die "No interactive console to ask for the admin login. Run this command in the Droplet Console."
+  ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+  while [ -z "$ADMIN_EMAIL" ]; do read -rp "  Admin email: " ADMIN_EMAIL </dev/tty; done
+  while true; do
+    read -rsp "  Admin password (8+ characters, typing is hidden): " P1 </dev/tty; echo
+    read -rsp "  Type it again: " P2 </dev/tty; echo
+    if [ "$P1" != "$P2" ]; then echo "  Passwords don't match, try again."; continue; fi
+    if [ "${#P1}" -lt 8 ]; then echo "  Use at least 8 characters."; continue; fi
+    break
+  done
+  printf '%s\n' "$P1" | $CC create-admin "$ADMIN_EMAIL" --stdin || die "Couldn't create the admin account."
+  unset P1 P2
+fi
+
 # Video sites change often; keep the downloader current (restart happens at a quiet hour).
 cat > /etc/cron.d/clipcore-update <<EOF
 17 9 * * * root $APP_DIR/.venv/bin/pip install -q --upgrade yt-dlp && systemctl restart clipcore
@@ -137,14 +156,13 @@ cat <<EOF
 
   Open:  $URL
 
-  1. Create the first account. It becomes the admin.
-  2. Admin page: paste your Twitch Client ID + Secret (optional,
-     but it makes Twitch clip ranking much better)
+  1. Log in with the admin email and password you just set
+  2. Admin page: add your Twitch keys and Anthropic API key
   3. Paste a VOD link and get clips
 
   Update later:  run the same install command again
   Logs:          journalctl -u clipcore -f
-  Forgot password:  sudo -u clipcore CLIPCORE_DATA_DIR=$DATA_DIR $APP_DIR/.venv/bin/clipcore reset-password EMAIL NEWPASSWORD
+  Forgot admin password:  $CC create-admin YOUR-EMAIL
 ────────────────────────────────────────────────────────────
 EOF
 if [ -z "$DOMAIN" ]; then

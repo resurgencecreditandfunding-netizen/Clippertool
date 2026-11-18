@@ -19,7 +19,12 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("reset-password", help="set a new password for an account")
     r.add_argument("email")
-    r.add_argument("password")
+    r.add_argument("password", nargs="?", help="omit to be asked (keeps it out of shell history)")
+
+    ca = sub.add_parser("create-admin", help="create the admin account (or reset it) — server only")
+    ca.add_argument("email")
+    ca.add_argument("--stdin", action="store_true", help="read the password from standard input")
+    sub.add_parser("has-admin", help="exit 0 if an admin account exists, 1 if not")
 
     sub.add_parser("cleanup", help="delete projects older than the retention window")
     sub.add_parser("preload", help="download the caption model ahead of the first job")
@@ -62,8 +67,29 @@ def main(argv: list[str] | None = None) -> int:
         if not u:
             print("No account with that email.")
             return 1
-        set_password(u.id, args.password)
+        import getpass
+        set_password(u.id, args.password or getpass.getpass("New password (8+ characters): "))
         print("Password updated.")
+    elif args.cmd == "create-admin":
+        import getpass
+        import sys
+        from .auth import AuthError, create_admin
+        if args.stdin:
+            pw = sys.stdin.readline().rstrip("\n")
+        else:
+            pw = getpass.getpass("Admin password (8+ characters): ")
+            if pw != getpass.getpass("Type it again: "):
+                print("Passwords don't match.")
+                return 1
+        try:
+            u = create_admin(args.email, pw)
+        except AuthError as e:
+            print(e)
+            return 1
+        print(f"Admin account ready: {u.email}")
+    elif args.cmd == "has-admin":
+        from .auth import admin_exists
+        return 0 if admin_exists() else 1
     elif args.cmd == "cleanup":
         from .maintenance import cleanup
         print(cleanup())

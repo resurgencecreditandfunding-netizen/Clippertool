@@ -87,8 +87,7 @@ class Creds(BaseModel):
 @app.get("/api/auth/status")
 def auth_status(request: Request):
     u = request.state.user
-    return {"logged_in": bool(u), "first_user": auth.user_count() == 0,
-            "invite_required": bool(settings.invite_code) and auth.user_count() > 0}
+    return {"logged_in": bool(u), "invite_required": bool(settings.invite_code)}
 
 
 @app.post("/api/auth/signup")
