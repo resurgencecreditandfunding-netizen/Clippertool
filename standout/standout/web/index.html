@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StandOut</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body>
+<header class="top">
+  <div class="logo">Stand<span>Out</span></div>
+  <nav id="tabs">
+    <button data-tab="content" class="on">📅 Content</button>
+    <button data-tab="funnels">🧲 Funnels</button>
+    <button data-tab="leads">👥 Leads <b id="newBadge" class="badge" hidden></b></button>
+  </nav>
+  <div class="top-right">
+    <button class="icon" data-tab="setup" title="Setup">⚙️</button>
+    <button class="icon" id="logout" title="Log out">↪</button>
+  </div>
+</header>
+<div id="banner" class="banner" hidden></div>
+<main id="view"></main>
+<aside id="drawer" class="drawer" hidden><div class="drawer-inner" id="drawerBody"></div></aside>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body></html>

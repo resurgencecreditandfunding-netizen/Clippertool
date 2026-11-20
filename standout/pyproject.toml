@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "standout"
+version = "0.1.0"
+description = "All-in-one for local service businesses: content scripts + calendar, funnels, CRM and follow-up automation."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "httpx>=0.27",
+  "anthropic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["standout*"]
+
+[tool.setuptools.package-data]
+standout = ["web/*"]

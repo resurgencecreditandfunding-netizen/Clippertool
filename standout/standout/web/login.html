@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StandOut: Log in</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body class="auth">
+<main class="auth-card">
+  <h1 class="logo">Stand<span>Out</span></h1>
+  <p class="muted">Content, funnels and follow-up in one place.</p>
+  <div class="seg"><button id="tLogin" class="on">Log in</button><button id="tSignup">Create account</button></div>
+  <form id="f">
+    <label id="bizRow" hidden>Business name<input name="business" autocomplete="organization"></label>
+    <label>Email<input name="email" type="email" required autocomplete="email"></label>
+    <label>Password<input name="password" type="password" required minlength="8" autocomplete="current-password"></label>
+    <label id="codeRow" hidden>Access code<input name="code"></label>
+    <p id="err" class="err" hidden></p>
+    <button class="btn primary" id="go">Log in</button>
+  </form>
+</main>
+<script>
+let mode = "login", needsCode = false;
+fetch("/api/auth/config").then(r => r.json()).then(c => needsCode = c.needs_code);
+const $ = id => document.getElementById(id);
+function set(m) {
+  mode = m; $("tLogin").classList.toggle("on", m === "login"); $("tSignup").classList.toggle("on", m === "signup");
+  $("bizRow").hidden = m === "login"; $("codeRow").hidden = m === "login" || !needsCode;
+  $("go").textContent = m === "login" ? "Log in" : "Create my account";
+}
+$("tLogin").onclick = () => set("login"); $("tSignup").onclick = () => set("signup");
+$("f").onsubmit = async e => {
+  e.preventDefault(); $("err").hidden = true;
+  const body = Object.fromEntries(new FormData(e.target));
+  const r = await fetch("/api/" + mode, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (r.ok) location.href = "/";
+  else { const d = await r.json().catch(() => ({})); $("err").textContent = d.detail || "Something went wrong."; $("err").hidden = false; }
+};
+</script>
+</body></html>
