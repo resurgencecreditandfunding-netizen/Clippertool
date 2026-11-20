@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, automation, brand, content, funnels, meta, reviews, voice
+from . import auth, automation, brand, content, funnels, launch, meta, reviews, voice
 from .config import settings
 from .db import db, init_db, now, row
 from .profile import FIELDS, SYSTEM_FIELDS, complete, missing
@@ -635,6 +635,17 @@ def update_funnel_for(aid: int, key: str, body: FunnelIn) -> None:
                             "on": bool(s.get("on", True))})
             seq.sort(key=lambda s: s["delay"])
             conn.execute("UPDATE funnels SET sequence = ? WHERE account_id = ? AND key = ?", (json.dumps(seq), aid, key))
+
+
+@app.get("/api/launch/{key}")
+def launch_kit(key: str, aid: int = Depends(account_id)):
+    if key not in funnels.FUNNELS:
+        raise HTTPException(404, "No such funnel")
+    with db() as conn:
+        a = load_account(conn, aid)
+        ensure_funnels(conn, aid)
+        enabled = conn.execute("SELECT enabled FROM funnels WHERE account_id = ? AND key = ?", (aid, key)).fetchone()[0]
+    return launch.kit(a, key, funnel_link(a, key), bool(enabled))
 
 
 @app.put("/api/funnels/{key}")

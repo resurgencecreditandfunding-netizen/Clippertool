@@ -181,3 +181,15 @@ input[type=color] { height: 42px; padding: 4px; }
 .bar { height: 6px; width: 90px; background: var(--line); border-radius: 99px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 6px; }
 .bar i { display: block; height: 100%; background: var(--ok); }
 .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); }
+
+/* launch kit */
+.checks { display: grid; gap: 6px; }
+.check { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: baseline; }
+.check small { grid-column: 2; }
+.kit { display: grid; gap: 8px; }
+.kitrow { display: grid; grid-template-columns: 150px 1fr auto; gap: 10px; align-items: start; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.kl { font-size: 13px; font-weight: 700; color: var(--muted); padding-top: 2px; }
+.kv { display: grid; gap: 4px; min-width: 0; }
+.kv pre { white-space: pre-wrap; font: inherit; font-size: 14px; background: var(--bg); padding: 8px 10px; border-radius: 8px; margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .kitrow { grid-template-columns: 1fr auto; } .kl { grid-column: 1 / -1; } }
+#kit h3 { margin: 18px 0 8px; }

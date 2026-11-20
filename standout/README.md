@@ -35,6 +35,10 @@ The admin dashboard also tracks whether the $497 setup fee is paid, and shows mo
 
 Finishing builds their first 30-day content plan automatically. Everything stays editable under ⚙️ Setup.
 
+## Launch Kit (the "which buttons do I press" screen)
+
+Every funnel has a 🚀 Launch Kit: the exact Meta Ads Manager settings, filled in for that business. It covers the objective, campaign name, budget, Pixel, conversion event, location and radius, audience and placements, plus the primary text, headline, call-to-action button and tracked website URL, each with a copy button. Competitor-gap ads are added as extra ads in the same ad set. A "Before you start" checklist catches a missing Pixel, domain verification or promises. The after-launch rules (hands off for days 1 to 5, move leads through stages, then switch optimization to QualifiedLead/Purchase once volume allows) are on the same screen. Ads Manager menu names drift over time; the settings are what matter.
+
 ## Admin dashboard (`/admin`, for you)
 
 - **Enroll a customer:** enter business, email, website and contact limit. We create the account, import their brand, and give you a one-time setup link (valid 7 days) to send them.

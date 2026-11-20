@@ -209,22 +209,27 @@ async function renderFunnels() {
         <div><b>${f.stats.leads_30}</b><span>Leads (30d)</span></div><div><b>${f.stats.rate_30}%</b><span>Convert (30d)</span></div></div>
       <div class="link"><input readonly value="${esc(f.link)}"><button class="btn small" data-copy="${esc(f.link)}">Copy</button></div>
       <div class="row" style="margin-top:10px"><a class="btn small" target="_blank" href="${esc(f.preview)}">View page ↗</a>
-        <button class="btn small primary" data-open="${f.key}">Edit · Follow-up · Ad</button></div>
+        <button class="btn small primary" data-open="${f.key}">Edit · Follow-up · Ad</button>
+        <button class="btn small" data-launch="${f.key}">🚀 Launch Kit</button></div>
     </div>`).join("")}</div>`;
   view.querySelectorAll("[data-copy]").forEach(b => b.onclick = () => copy(b.dataset.copy, "Link copied"));
   view.querySelectorAll("[data-toggle]").forEach(c => c.onchange = async () => {
     await api(`/api/funnels/${c.dataset.toggle}`, {method: "PUT", body: {enabled: c.checked}}); toast(c.checked ? "Page is live" : "Page turned off");
   });
   view.querySelectorAll("[data-open]").forEach(b => b.onclick = () => openFunnel(b.dataset.open, "followup"));
+  view.querySelectorAll("[data-launch]").forEach(b => b.onclick = () => openFunnel(b.dataset.launch, "launch"));
 }
 
 function openFunnel(key, sub) {
   const f = FUNNELS.find(x => x.key === key);
   const d = openDrawer(`
     <div class="row"><h2 style="flex:1">${esc(f.name)}</h2><button class="icon" onclick="closeDrawer()">✕</button></div>
-    <div class="tabs2"><button data-sub="followup">Follow-up</button><button data-sub="page">Page words</button><button data-sub="ad">Facebook ad</button></div>
+    <div class="tabs2"><button data-sub="launch">🚀 Launch Kit</button><button data-sub="followup">Follow-up</button><button data-sub="page">Page words</button><button data-sub="ad">Facebook ad</button></div>
     <div id="fsub"></div>`);
   const subs = {
+    launch() {
+      return `<div id="kit"><p class="muted">Loading your settings…</p></div>`;
+    },
     followup() {
       const steps = f.sequence;
       return `<p class="muted">Every lead from this page gets these messages automatically. Follow-up stops on its own when you move the lead out of <b>New</b> or they text back.</p>
@@ -264,6 +269,7 @@ function openFunnel(key, sub) {
   const wire = s => {
     d.querySelectorAll("[data-sub]").forEach(b => b.classList.toggle("on", b.dataset.sub === s));
     $("#fsub", d).innerHTML = subs[s]();
+    if (s === "launch") drawKit(key, $("#kit", d));
     if (s === "followup") {
       d.querySelectorAll(".step .on").forEach(c => c.onchange = () => c.closest(".step").classList.toggle("off", !c.checked));
       $("#saveSeq", d).onclick = async () => {
@@ -291,6 +297,18 @@ function openFunnel(key, sub) {
   };
   d.querySelectorAll("[data-sub]").forEach(b => b.onclick = () => wire(b.dataset.sub));
   wire(sub);
+}
+
+async function drawKit(key, box) {
+  const k = await api(`/api/launch/${key}`);
+  const items = [];
+  box.innerHTML = `<p class="muted">Every setting for Facebook Ads Manager, already filled in for you. Go top to bottom, copy, paste, publish.</p>
+    <div class="card" style="box-shadow:none"><b>When to run this one:</b> ${esc(k.when)}</div>
+    <h3>Before you start</h3><div class="checks">${k.checks.map(c => `<div class="check ${c.ok ? "ok" : ""}">${c.ok ? "✅" : "⬜"} <b>${esc(c.label)}</b>${c.ok ? "" : `<small class="muted">${esc(c.fix)}</small>`}</div>`).join("")}</div>
+    ${k.steps.map(s => `<h3>${esc(s.title)}</h3><div class="kit">${s.items.map(it => { items.push(it); const i = items.length - 1; return `
+      <div class="kitrow"><div class="kl">${esc(it.label)}</div><div class="kv">${it.copy ? `<pre>${esc(it.value)}</pre>` : `<b>${esc(it.value)}</b>`}
+        ${it.note ? `<small class="muted">${esc(it.note)}</small>` : ""}</div>${it.copy ? `<button class="btn small" data-kc="${i}">Copy</button>` : "<span></span>"}</div>`; }).join("")}</div>`).join("")}`;
+  box.querySelectorAll("[data-kc]").forEach(b => b.onclick = () => copy(items[+b.dataset.kc].value, items[+b.dataset.kc].label + " copied"));
 }
 
 // ------------------------------------------------------------------ LEADS
