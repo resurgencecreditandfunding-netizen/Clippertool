@@ -19,6 +19,7 @@ async function api(path, opts = {}) {
   const r = await fetch(path, init);
   if (r.status === 401) { location.href = "/login"; throw new Error("logged out"); }
   const data = await r.json().catch(() => ({}));
+  if (r.status === 402) { showLocked(data.detail); throw new Error(data.detail); }
   if (!r.ok) throw new Error(data.detail || "Something went wrong");
   return data;
 }
@@ -43,14 +44,27 @@ const ago = ts => {
 const delayText = s => s === 0 ? "Right away" : s < 3600 ? `After ${Math.round(s / 60)} min` : s < 86400 ? `After ${Math.round(s / 3600)} hr` : `After ${Math.round(s / 86400)} day${s >= 172800 ? "s" : ""}`;
 
 // ------------------------------------------------------------------ shell
+function showLocked(msg) {
+  document.querySelector(".top nav").style.visibility = "hidden";
+  view.innerHTML = `<div class="card empty" style="max-width:560px;margin:40px auto"><h2>Your account is paused</h2>
+    <p class="muted">${esc(msg || "")}</p><p class="muted">Your contacts and settings are saved. Reach out and we'll turn everything back on.</p></div>`;
+}
 async function loadMe() {
   ME = await api("/api/me");
+  const cl = $("#communityLink");
+  if (ME.community_url && ME.plan_status !== "canceled" && !cl) {
+    $(".top-right").insertAdjacentHTML("afterbegin", `<a class="btn small" id="communityLink" target="_blank" rel="noopener" href="${esc(ME.community_url)}">💬 Community &amp; support</a>`);
+  }
   const b = $("#banner");
   const pct = ME.contacts_used / ME.contact_limit;
   if (ME.acting_as) {
     b.innerHTML = `You're working inside <b>${esc(ME.profile.business || ME.email)}</b>'s account as an admin. <a href="#" id="backAdmin">← Back to admin</a>`;
     b.hidden = false;
     $("#backAdmin").onclick = async e => { e.preventDefault(); await api("/api/admin/return", {method: "POST"}); location.href = "/admin"; };
+  } else if (ME.plan_status === "canceled") {
+    b.hidden = true; showLocked("Your subscription is canceled."); throw new Error("canceled");
+  } else if (ME.plan_status === "past_due") {
+    b.textContent = "Your last payment didn't go through. Update your payment so your funnels and follow-up keep running."; b.hidden = false;
   } else if (ME.missing.length) {
     b.innerHTML = `Finish your setup so your funnels and scripts use your real business info. <a href="#" data-go="setup">Finish setup →</a>`;
     b.hidden = false;
@@ -240,7 +254,11 @@ function openFunnel(key, sub) {
         <label>Primary text</label><div class="adbox">${esc(a.primary)}</div><button class="btn small" id="cP">Copy primary text</button>
         <label>Headline</label><div class="adbox">${esc(a.headline)}</div><button class="btn small" id="cHd">Copy headline</button>
         <label>Website URL</label><div class="adbox">${esc(a.link)}</div><button class="btn small" id="cL">Copy link</button>
-        <div class="card" style="box-shadow:none"><b>Angle:</b> ${esc(a.angle)}</div>`;
+        <div class="card" style="box-shadow:none"><b>Angle:</b> ${esc(a.angle)}</div>
+        ${f.gap_ads.length ? `<h3 style="margin-top:8px">Competitor-gap ads</h3><p class="muted">Built from what local customers complain about most, answered with your promises. No competitor is ever named.</p>
+          ${f.gap_ads.map((g, i) => `<div class="card" style="box-shadow:none;display:grid;gap:6px"><b>${esc(g.label)}</b><small class="muted">${esc(g.angle)}</small>
+            <div class="adbox">${esc(g.primary)}</div><div class="row"><button class="btn small" data-gp="${i}">Copy primary text</button><button class="btn small" data-gh="${i}">Copy headline</button></div></div>`).join("")}`
+          : `<p class="muted">Tip: confirm your promises in Setup → Your edge to get ads built from your competitors' 1-2 star reviews.</p>`}`;
     },
   };
   const wire = s => {
@@ -267,6 +285,8 @@ function openFunnel(key, sub) {
     };
     if (s === "ad") {
       $("#cP", d).onclick = () => copy(f.ad.primary); $("#cHd", d).onclick = () => copy(f.ad.headline); $("#cL", d).onclick = () => copy(f.ad.link);
+      d.querySelectorAll("[data-gp]").forEach(b => b.onclick = () => copy(f.gap_ads[+b.dataset.gp].primary));
+      d.querySelectorAll("[data-gh]").forEach(b => b.onclick = () => copy(f.gap_ads[+b.dataset.gh].headline));
     }
   };
   d.querySelectorAll("[data-sub]").forEach(b => b.onclick = () => wire(b.dataset.sub));
@@ -432,6 +452,12 @@ const SECTIONS = {
       ${fieldArea("services", 2, "water heaters, drain cleaning, leak repair")}${fieldArea("problems", 2, "What do people call you about?")}
       ${fieldArea("ideal_customer")}${fieldInput("offer", "text", "$50 off your first service")}${fieldArea("guarantee")}${fieldArea("difference")}`,
   },
+  edge: {
+    title: "Your edge",
+    intro: "We read your local competitors' 1 and 2 star reviews and find what customers hate most. Then you pick the promises you can keep. They go into your funnels, ads, scripts and follow-up.",
+    html: () => `<div id="edgeBox" class="secbody"><p class="muted">Loading…</p></div>`,
+    wire: el => drawEdge(el),
+  },
   voice: {
     title: "Your voice", intro: "Your follow-up texts and emails should sound like you, not a robot. Tell us how you talk and we'll rewrite every message in your voice.",
     html: () => {
@@ -514,6 +540,57 @@ const SECTIONS = {
     },
   },
 };
+// ---- competitor edge
+async function drawEdge(el) {
+  const box = $("#edgeBox", el);
+  const e = await api("/api/edge");
+  const r = e.report;
+  const runUi = `${e.available ? `<div class="row"><button class="btn primary" id="edgeRun" type="button">🔎 Find what customers hate about my competitors</button>
+      <small class="muted">Looks up ${esc(ME.profile.trade || "your trade")} companies near ${esc(ME.profile.city || "you")} on Google.</small></div>` : ""}
+    <details ${e.available ? "" : "open"}><summary style="cursor:pointer;font-weight:600">${e.available ? "Or paste" : "Paste"} competitor reviews yourself</summary>
+      <textarea id="edgePaste" rows="5" placeholder="Copy 1 and 2 star reviews from your competitors' Google or Yelp pages. Leave a blank line between reviews." style="margin-top:8px"></textarea>
+      <button class="btn" id="edgePasteGo" type="button" style="margin-top:8px">Analyze pasted reviews</button></details>
+    <p id="edgeMsg" class="muted" style="margin:0"></p>`;
+  if (!r) { box.innerHTML = runUi; return wireEdgeRun(el); }
+  const max = Math.max(...r.themes.map(t => t.share), 1);
+  box.innerHTML = `
+    <div class="card" style="box-shadow:none"><b>🔒 Private to you.</b> <span class="muted">We analyzed ${r.reviews_analyzed} bad reviews${r.competitors.length ? ` from ${r.competitors.length} local competitors (${r.competitors.map(c => esc(c.name)).join(", ")})` : ""}.
+      Competitor names and reviews never appear in your funnels, ads or posts.</span></div>
+    <h3>What local customers complain about</h3>
+    <div class="themes">${r.themes.map(t => `<div class="theme"><div class="row"><b style="flex:1">${esc(t.label)}</b><span>${t.share}%</span></div>
+      <div class="tbar"><i style="width:${100 * t.share / max}%"></i></div><small class="muted">${esc(t.summary)}</small>
+      ${t.examples.length ? `<small class="muted"><i>“${esc(t.examples[0])}”</i></small>` : ""}</div>`).join("")}</div>
+    <h3>Your promises: tick only what you really do</h3>
+    <div id="dlist">${e.distinguishers.map((d, i) => `<div class="step ${d.on ? "" : "off"}" data-d="${i}">
+      <label class="row" style="color:var(--ink)"><input type="checkbox" class="don" style="width:auto" ${d.on ? "checked" : ""}> <b>${esc(d.label)}</b> <span class="muted">(${d.share}% of bad reviews)</span></label>
+      <label>Your promise<input class="dpromise" value="${esc(d.promise)}"></label>
+      <div class="grid2"><label>How you prove it<input class="dproof" value="${esc(d.proof)}"></label><label>Ad / video hook<input class="dhook" value="${esc(d.hook)}"></label></div></div>`).join("")}</div>
+    <div class="row"><button class="btn primary" id="edgeSave" type="button">Save my promises</button></div>
+    <details><summary style="cursor:pointer;font-weight:600">Run it again</summary>${runUi}</details>`;
+  box.querySelectorAll(".don").forEach(c => c.onchange = () => c.closest(".step").classList.toggle("off", !c.checked));
+  $("#edgeSave", box).onclick = async () => { const n = await saveEdge(el); toast(`${n} promise${n === 1 ? "" : "s"} saved. Your funnels and ads now use them`); };
+  box._dist = e.distinguishers;
+  wireEdgeRun(el);
+}
+function wireEdgeRun(el) {
+  const go = async (body, btn) => {
+    btn.disabled = true; const label = btn.textContent; btn.textContent = "Reading reviews… (up to a minute)";
+    try { await api("/api/edge/run", {method: "POST", body}); await drawEdge(el); toast("Done. Pick your promises"); }
+    catch (err) { const m = $("#edgeMsg", el); if (m) m.textContent = err.message; btn.disabled = false; btn.textContent = label; }
+  };
+  $("#edgeRun", el) && ($("#edgeRun", el).onclick = e => go({}, e.target));
+  $("#edgePasteGo", el) && ($("#edgePasteGo", el).onclick = e => go({pasted: $("#edgePaste", el).value}, e.target));
+}
+async function saveEdge(el) {
+  const box = $("#edgeBox", el);
+  if (!box || !box._dist) return 0;
+  const ds = [...box.querySelectorAll("[data-d]")].map(s => ({...box._dist[+s.dataset.d], on: $(".don", s).checked,
+    promise: $(".dpromise", s).value, proof: $(".dproof", s).value, hook: $(".dhook", s).value}));
+  const r = await api("/api/edge", {method: "PUT", body: {distinguishers: ds}});
+  await loadMe();
+  return r.confirmed;
+}
+
 function sectionCard(key, withSave = true) {
   const s = SECTIONS[key];
   return `<section class="card setup" data-sec="${key}"><h2>${s.title}</h2><p class="muted">${s.intro}</p><div class="secbody">${s.html()}</div>
@@ -529,16 +606,18 @@ async function renderSetup() {
   await loadMe();
   view.innerHTML = `<div class="head"><div class="grow"><h1>Setup</h1><p class="muted">Change anything here and your funnels, scripts and messages update with it.</p></div>
     <a class="btn" href="#" id="rerun">Run the setup guide again</a></div>
-    <div style="display:grid;gap:16px">${Object.keys(SECTIONS).map(k => sectionCard(k)).join("")}</div>`;
+    <div style="display:grid;gap:16px">${Object.keys(SECTIONS).map(k => sectionCard(k, k !== "edge")).join("")}</div>`;
   view.querySelectorAll("[data-sec]").forEach(el => SECTIONS[el.dataset.sec].wire?.(el));
-  view.querySelectorAll("[data-save]").forEach(b => b.onclick = async () => {
+  view.querySelectorAll("[data-save]").forEach(b => b.onclick = b.dataset.save === "edge" ? async () => {
+    const n = await saveEdge(b.closest("[data-sec]")); toast(`${n} promise${n === 1 ? "" : "s"} saved`);
+  } : async () => {
     try { const r = await saveSection(b.closest("[data-sec]")); toast(r.missing.length ? "Saved. A few required fields are still empty (*)" : "Saved"); }
     catch (e) { toast(e.message); }
   });
   $("#rerun").onclick = e => { e.preventDefault(); runOnboarding(0); };
 }
 
-const STEPS = ["brand", "business", "voice", "tracking", "domain"];
+const STEPS = ["brand", "business", "edge", "voice", "tracking", "domain"];
 async function runOnboarding(i = 0) {
   await loadMe();
   document.querySelector(".top nav").style.visibility = "hidden";
@@ -547,7 +626,7 @@ async function runOnboarding(i = 0) {
     <div class="dots">${STEPS.map((k, j) => `<span class="${j < i ? "done" : j === i ? "on" : ""}">${j + 1}. ${SECTIONS[k].title}</span>`).join("")}</div>
     ${sectionCard(key, false)}
     <div class="row"><button class="btn" id="back" ${i === 0 ? "hidden" : ""}>← Back</button><span style="flex:1"></span>
-      ${["tracking", "domain"].includes(key) ? `<button class="btn" id="skip">Skip for now</button>` : ""}
+      ${["edge", "tracking", "domain"].includes(key) ? `<button class="btn" id="skip">Skip for now</button>` : ""}
       <button class="btn primary" id="next">${i === STEPS.length - 1 ? "Finish and build my month →" : "Save and continue →"}</button></div></div>`;
   const el = $("[data-sec]", view);
   SECTIONS[key].wire?.(el);
@@ -561,7 +640,8 @@ async function runOnboarding(i = 0) {
   };
   $("#next").onclick = async () => {
     try {
-      if (key !== "domain") { const r = await saveSection(el); if (key === "business" && r.missing.length) return toast("Fill in the fields marked *"); }
+      if (key === "edge") await saveEdge(el);
+      else if (key !== "domain") { const r = await saveSection(el); if (key === "business" && r.missing.length) return toast("Fill in the fields marked *"); }
       advance();
     } catch (e) { toast(e.message); }
   };

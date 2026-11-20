@@ -11,6 +11,7 @@ import json
 import re
 
 from .profile import complete, fill, split
+from .reviews import confirmed
 
 HOUR = 3600
 DAY = 86400
@@ -169,6 +170,20 @@ def render_ad(key: str, profile: dict, link: str) -> dict:
             "angle": ad["angle"], "link": link}
 
 
+def gap_ads(profile: dict, link: str) -> list[dict]:
+    """One ad per confirmed distinguisher: name the frustration, answer it with the promise."""
+    p = complete(profile)
+    ds = confirmed(profile)
+    out = []
+    for d in ds[:3]:
+        others = "".join(f"\n✅ {o['promise']}" for o in ds if o is not d)[:400]
+        out.append({"label": d["label"], "headline": d["hook"][:60],
+                    "primary": f"{d['hook']}\n\nAt {p['business']}, {d['promise'][0].lower() + d['promise'][1:]}{others}"
+                               f"\n\nServing {p['service_area']}. Tap below for your free estimate.",
+                    "angle": f"Competitor gap: {d['share']}% of bad local reviews are about this.", "link": link})
+    return out
+
+
 def _e(s: str) -> str:
     return html.escape(s, quote=True)
 
@@ -216,7 +231,8 @@ def render_page(key: str, overrides: dict, profile: dict, action: str, head_extr
     p = complete(profile)
     f = merged(key, overrides)
     color, accent, font, font_head = brand_style(p)
-    bullets = "".join(f"<li>{_e(fill(b, p))}</li>" for b in f["bullets"])
+    promises = [d["promise"] for d in confirmed(profile)][:2] if not overrides.get("bullets") else []
+    bullets = "".join(f"<li>{_e(fill(b, p))}</li>" for b in (promises + f["bullets"])[:4])
     inputs = []
     for name in f["fields"]:
         label, kind, req = FIELD_LABELS[name]

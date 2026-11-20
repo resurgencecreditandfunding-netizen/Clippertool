@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, automation, brand, content, funnels, meta, voice
+from . import auth, automation, brand, content, funnels, meta, reviews, voice
 from .config import settings
 from .db import db, init_db, now, row
 from .profile import FIELDS, SYSTEM_FIELDS, complete, missing
@@ -78,7 +78,15 @@ def session(request: Request) -> dict:
     return data
 
 
+PLAN_STATUSES = ("active", "past_due", "canceled")
+
+
 def account_id(s: dict = Depends(session)) -> int:
+    if not s.get("adm"):
+        with db() as conn:
+            r = conn.execute("SELECT plan_status FROM accounts WHERE id = ?", (s["a"],)).fetchone()
+        if r and r["plan_status"] == "canceled":
+            raise HTTPException(402, "Your subscription is canceled. Reactivate it to get back in.")
     return int(s["a"])
 
 
@@ -253,7 +261,7 @@ def auth_config():
 def me_payload(conn, aid: int, s: dict | None = None) -> dict:
     a = load_account(conn, aid)
     prof = a["profile"]
-    safe = {k: v for k, v in prof.items() if k not in ("fb_page_token", "capi_token", "site_text")}
+    safe = {k: v for k, v in prof.items() if k not in ("fb_page_token", "capi_token", "site_text", "edge_report")}
     safe["fb_connected"] = bool(prof.get("fb_page_id") and prof.get("fb_page_token"))
     safe["capi_connected"] = meta.connected(prof)
     safe["has_site_text"] = bool(prof.get("site_text"))
@@ -262,6 +270,8 @@ def me_payload(conn, aid: int, s: dict | None = None) -> dict:
             "acting_as": bool(s and s.get("adm")), "funnel_domain": a["funnel_domain"] or "",
             "cname_target": settings.cname_target or _base_host(),
             "contacts_used": contact_count(conn, aid), "contact_limit": limit_for(a),
+            "plan_status": a["plan_status"], "community_url": settings.community_url,
+            "edge_available": reviews.available(), "edge_count": len(reviews.confirmed(prof)),
             "ai": content.ai_available(),
             "sms_live": bool(settings.twilio_sid and settings.twilio_from),
             "email_live": bool(settings.smtp_host and settings.smtp_from)}
@@ -436,6 +446,70 @@ def voice_generate(aid: int = Depends(account_id)):
     return generate_voice(aid)
 
 
+# ---------------------------------------------------------------- competitor edge (review intelligence)
+class EdgeRunIn(BaseModel):
+    pasted: str = ""
+
+
+class EdgeSaveIn(BaseModel):
+    distinguishers: list[dict]
+
+
+EDGE_COOLDOWN = 3600  # paid lookups: once an hour per account (admins can rerun anytime)
+
+
+def run_edge(aid: int, pasted: str = "", force: bool = False) -> dict:
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+    last = float(prof.get("edge_run") or 0)
+    if not pasted.strip() and not force and now() - last < EDGE_COOLDOWN:
+        raise HTTPException(429, "You just ran this. Try again in an hour, or paste reviews by hand.")
+    try:
+        report = reviews.build_report(prof, pasted)  # slow network + AI work outside any transaction
+    except reviews.ReviewError as e:
+        raise HTTPException(400, str(e))
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+        was_on = {d.get("label"): d for d in prof.get("distinguishers") or [] if d.get("on")}
+        fresh = reviews.to_distinguishers(report["themes"])
+        for d in fresh:  # keep what the owner already confirmed/edited
+            if d["label"] in was_on:
+                d.update({k: was_on[d["label"]][k] for k in ("promise", "proof", "hook", "on")})
+        prof.update({"edge_report": report, "distinguishers": fresh, "edge_run": now()})
+        save_profile_dict(conn, aid, prof)
+    return {"report": report, "distinguishers": fresh}
+
+
+@app.get("/api/edge")
+def edge_get(aid: int = Depends(account_id)):
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+    return {"available": reviews.available(), "report": prof.get("edge_report"),
+            "distinguishers": prof.get("distinguishers") or [], "last_run": prof.get("edge_run")}
+
+
+@app.post("/api/edge/run")
+def edge_run(body: EdgeRunIn, s: dict = Depends(session), aid: int = Depends(account_id)):
+    return run_edge(aid, body.pasted, force=bool(s.get("adm")))
+
+
+@app.put("/api/edge")
+def edge_save(body: EdgeSaveIn, aid: int = Depends(account_id)):
+    clean = []
+    for d in body.distinguishers[:8]:
+        promise = str(d.get("promise", "")).strip()[:200]
+        if not promise:
+            continue
+        clean.append({"key": str(d.get("key", ""))[:20], "label": str(d.get("label", ""))[:80],
+                      "share": int(d.get("share") or 0), "promise": promise, "proof": str(d.get("proof", ""))[:200],
+                      "hook": str(d.get("hook", ""))[:140], "on": bool(d.get("on"))})
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+        prof["distinguishers"] = clean
+        save_profile_dict(conn, aid, prof)
+    return {"ok": True, "confirmed": sum(d["on"] for d in clean)}
+
+
 # ---------------------------------------------------------------- tracking (Pixel + Conversions API)
 @app.get("/api/tracking")
 def tracking_status(aid: int = Depends(account_id)):
@@ -536,6 +610,7 @@ def list_funnels(aid: int = Depends(account_id)):
                 "copy": {k: merged[k] for k in ("headline", "sub", "button", "thanks", "bullets")},
                 "sequence": f["sequence"] or funnels.default_sequence(key),
                 "ad": funnels.render_ad(key, a["profile"], link),
+                "gap_ads": funnels.gap_ads(a["profile"], link),
             })
     return out
 
@@ -581,7 +656,7 @@ def reset_funnel(key: str, aid: int = Depends(account_id)):
 # ---------------------------------------------------------------- public funnel pages
 def _public_funnel(conn, slug: str, key: str):
     a = row(conn.execute("SELECT * FROM accounts WHERE slug = ?", (slug,)).fetchone(), ("profile",))
-    if not a or key not in funnels.FUNNELS:
+    if not a or key not in funnels.FUNNELS or a["plan_status"] == "canceled":
         raise HTTPException(404, "Page not found")
     f = row(conn.execute("SELECT * FROM funnels WHERE account_id = ? AND key = ?", (a["id"], key)).fetchone(),
             ("overrides",))
@@ -944,6 +1019,8 @@ class EnrollIn(BaseModel):
 
 
 class AdminAccountPatch(BaseModel):
+    plan_status: Optional[str] = None
+    setup_paid: Optional[bool] = None
     contact_limit: Optional[int] = None
     profile: Optional[dict] = None
     domain: Optional[str] = None
@@ -955,6 +1032,7 @@ def _onboarding_steps(a: dict, has_posts: bool) -> dict:
     steps = {"Brand imported": bool(p.get("website") or p.get("logo")),
              "Business info": not missing(p),
              "Brand voice": bool(p.get("voice_guide") or p.get("tone")),
+             "Competitor edge": bool(reviews.confirmed(p)),
              "Pixel + CAPI": meta.connected(p),
              "Content plan": has_posts}
     return {"steps": steps, "pct": round(100 * sum(steps.values()) / len(steps))}
@@ -974,6 +1052,7 @@ def admin_customers(adm: int = Depends(admin_id)):
                 "trade": a["profile"].get("trade", ""), "city": a["profile"].get("city", ""),
                 "logo": a["profile"].get("logo", ""), "created": a["created"], "last_seen": a["last_seen"],
                 "onboarded": bool(a["onboarded"]), "domain": a["funnel_domain"] or "",
+                "plan_status": a["plan_status"], "setup_paid": bool(a["setup_paid"]),
                 "contacts": q("SELECT COUNT(*) FROM contacts WHERE account_id = ?"), "contact_limit": limit_for(a),
                 "leads_30": q("SELECT COUNT(*) FROM events WHERE account_id = ? AND kind = 'lead' AND created >= ?", month),
                 "views_30": q("SELECT COUNT(*) FROM events WHERE account_id = ? AND kind = 'view' AND created >= ?", month),
@@ -1013,6 +1092,10 @@ def admin_customer(aid: int, adm: int = Depends(admin_id)):
         payload["capi_log"] = [dict(r) for r in conn.execute(
             "SELECT event, status, detail, created FROM capi_log WHERE account_id = ? ORDER BY id DESC LIMIT 10", (aid,))]
         payload["id"] = aid
+        a = load_account(conn, aid)
+        payload["setup_paid"] = bool(a["setup_paid"])
+        payload["edge_report"] = a["profile"].get("edge_report")
+        payload["distinguishers"] = a["profile"].get("distinguishers") or []
     return payload
 
 
@@ -1020,6 +1103,12 @@ def admin_customer(aid: int, adm: int = Depends(admin_id)):
 def admin_update(aid: int, body: AdminAccountPatch, adm: int = Depends(admin_id)):
     with db() as conn:
         a = load_account(conn, aid)
+        if body.plan_status is not None:
+            if body.plan_status not in PLAN_STATUSES:
+                raise HTTPException(400, "Status must be active, past_due or canceled.")
+            conn.execute("UPDATE accounts SET plan_status = ? WHERE id = ?", (body.plan_status, aid))
+        if body.setup_paid is not None:
+            conn.execute("UPDATE accounts SET setup_paid = ? WHERE id = ?", (int(body.setup_paid), aid))
         if body.contact_limit is not None:
             conn.execute("UPDATE accounts SET contact_limit = ? WHERE id = ?", (max(1, body.contact_limit), aid))
         if body.onboarded is not None:
@@ -1039,6 +1128,11 @@ def admin_import(aid: int, body: ImportIn, adm: int = Depends(admin_id)):
 @app.post("/api/admin/customers/{aid}/voice")
 def admin_voice(aid: int, adm: int = Depends(admin_id)):
     return generate_voice(aid)
+
+
+@app.post("/api/admin/customers/{aid}/edge")
+def admin_edge(aid: int, body: EdgeRunIn, adm: int = Depends(admin_id)):
+    return run_edge(aid, body.pasted, force=True)
 
 
 @app.post("/api/admin/customers/{aid}/setup-link")

@@ -104,6 +104,8 @@ MIGRATIONS = [
     "ALTER TABLE accounts ADD COLUMN last_seen REAL",
     "ALTER TABLE contacts ADD COLUMN tracking TEXT NOT NULL DEFAULT '{}'",
     "CREATE UNIQUE INDEX IF NOT EXISTS accounts_domain ON accounts(funnel_domain)",
+    "ALTER TABLE accounts ADD COLUMN plan_status TEXT NOT NULL DEFAULT 'active'",
+    "ALTER TABLE accounts ADD COLUMN setup_paid INTEGER NOT NULL DEFAULT 0",
 ]
 
 _lock = threading.Lock()

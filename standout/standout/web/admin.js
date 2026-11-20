@@ -20,6 +20,9 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(
 $("#logout").onclick = async () => { await api("/api/logout", {method: "POST"}); location.href = "/login"; };
 const ago = ts => { if (!ts) return "never"; const s = Date.now() / 1000 - ts; return s < 3600 ? Math.max(1, Math.floor(s / 60)) + "m ago" : s < 86400 ? Math.floor(s / 3600) + "h ago" : Math.floor(s / 86400) + "d ago"; };
 
+const planChip = s => ({active: `<span style="color:var(--ok)">● Active</span>`, past_due: `<span style="color:var(--warn)">● Past due</span>`,
+  canceled: `<span style="color:var(--bad)">● Canceled</span>`})[s] || esc(s);
+
 async function render() {
   let list;
   try { list = await api("/api/admin/customers"); }
@@ -29,23 +32,24 @@ async function render() {
   <div class="head"><div class="grow"><h1>Customers</h1><p class="muted">Enroll members, see who's stuck in setup, and jump into any account to customize it.</p></div>
     <button class="btn primary" id="enroll">+ Enroll a customer</button></div>
   <div class="stats">
-    <div class="stat"><b>${list.length}</b><span>Customers</span></div>
+    <div class="stat"><b>${list.filter(c => c.plan_status === "active").length}</b><span>Active · $${(197 * list.filter(c => c.plan_status !== "canceled").length).toLocaleString()}/mo</span></div>
     <div class="stat"><b>${tot.done}</b><span>Fully set up</span></div>
     <div class="stat"><b>${list.length - tot.done}</b><span>Still onboarding</span></div>
     <div class="stat"><b>${tot.views}</b><span>Funnel visits (30d, all)</span></div>
     <div class="stat"><b>${tot.leads}</b><span>Leads generated (30d, all)</span></div>
   </div>
   <input id="q" placeholder="Search customers" style="max-width:320px;margin-bottom:12px">
-  <div class="tablewrap"><table class="atable"><thead><tr><th></th><th>Business</th><th>Setup</th><th>Leads (30d)</th><th>Contacts</th><th>Tracking</th><th>Domain</th><th>Last seen</th></tr></thead>
+  <div class="tablewrap"><table class="atable"><thead><tr><th></th><th>Business</th><th>Plan</th><th>Setup</th><th>Leads (30d)</th><th>Contacts</th><th>Tracking</th><th>Domain</th><th>Last seen</th></tr></thead>
   <tbody>${list.map(c => `<tr class="click" data-id="${c.id}">
     <td>${c.logo ? `<img src="${esc(c.logo)}" alt="">` : ""}</td>
     <td><b>${esc(c.business || "(no name)")}</b><br><small class="muted">${esc(c.email)}${c.trade ? " · " + esc(c.trade) : ""}${c.city ? " · " + esc(c.city) : ""}</small></td>
+    <td>${planChip(c.plan_status)}<br><small class="muted">${c.setup_paid ? "Setup paid" : "Setup unpaid"}</small></td>
     <td><span class="bar"><i style="width:${c.pct}%"></i></span>${c.pct}%<br><small class="muted">${esc(Object.entries(c.steps).filter(([, v]) => !v).map(([k]) => k).join(", ") || "Done")}</small></td>
     <td>${c.leads_30} <small class="muted">/ ${c.views_30} visits</small></td>
     <td>${c.contacts} / ${c.contact_limit}</td>
     <td>${c.steps["Pixel + CAPI"] ? (c.capi_errors ? `<span style="color:var(--bad)">● ${c.capi_errors} errors (24h)</span>` : `<span style="color:var(--ok)">● Live</span>`) : `<span class="muted">Not connected</span>`}</td>
     <td>${esc(c.domain) || `<span class="muted">-</span>`}</td><td>${ago(c.last_seen)}</td></tr>`).join("") ||
-    `<tr><td colspan="8" class="muted" style="text-align:center;padding:30px">No customers yet. Enroll your first one.</td></tr>`}</tbody></table></div>`;
+    `<tr><td colspan="9" class="muted" style="text-align:center;padding:30px">No customers yet. Enroll your first one.</td></tr>`}</tbody></table></div>`;
   $("#enroll").onclick = enroll;
   view.querySelectorAll("tr[data-id]").forEach(tr => tr.onclick = () => openCustomer(+tr.dataset.id));
   $("#q").oninput = e => { const q = e.target.value.toLowerCase(); view.querySelectorAll("tr[data-id]").forEach(tr => tr.hidden = q && !tr.textContent.toLowerCase().includes(q)); };
@@ -91,7 +95,13 @@ async function openCustomer(id) {
     <div class="grid2"><label>Main color<input type="color" id="c1" value="${esc(p.color || "#1f6feb")}"></label><label>Accent<input type="color" id="c2" value="${esc(p.color2 || p.color || "#1f6feb")}"></label></div>
     <label>Funnel domain<input id="dom" value="${esc(c.funnel_domain)}" placeholder="go.theirbusiness.com"></label>
     <label>Contact limit<input id="lim" type="number" value="${c.contact_limit}" min="1"></label>
-    <div class="row"><button class="btn primary" id="save">Save</button><button class="btn" id="voice">Rewrite follow-up in their voice</button></div>`);
+    <div class="grid2"><label>Subscription<select id="plan">${[["active", "Active"], ["past_due", "Past due (still works, shows warning)"], ["canceled", "Canceled (locks app, funnels offline)"]]
+      .map(([k, l]) => `<option value="${k}" ${c.plan_status === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      <label class="row" style="align-self:end;color:var(--ink)"><input type="checkbox" id="paid" style="width:auto" ${c.setup_paid ? "checked" : ""}> $497 setup fee paid</label></div>
+    <div class="row"><button class="btn primary" id="save">Save</button><button class="btn" id="voice">Rewrite follow-up in their voice</button>
+      <button class="btn" id="edge">Find their competitor edge</button></div>
+    ${c.edge_report ? `<h3>Competitor edge</h3><table class="tbl">${c.edge_report.themes.slice(0, 5).map(t => `<tr><td>${esc(t.label)}</td><td>${t.share}%</td></tr>`).join("")}</table>
+      <small class="muted">${c.distinguishers.filter(x => x.on).length} promise(s) confirmed by the customer</small>` : ""}`);
   $("#actAs", d).onclick = async () => { await api(`/api/admin/customers/${id}/act-as`, {method: "POST"}); location.href = "/"; };
   $("#link", d).onclick = async () => { const r = await api(`/api/admin/customers/${id}/setup-link`, {method: "POST"}); copy(r.setup_link, "Setup link copied"); };
   $("#imp", d).onclick = async () => {
@@ -101,9 +111,15 @@ async function openCustomer(id) {
   $("#save", d).onclick = async () => {
     try {
       await api(`/api/admin/customers/${id}`, {method: "PATCH", body: {contact_limit: +$("#lim", d).value, domain: $("#dom", d).value,
+        plan_status: $("#plan", d).value, setup_paid: $("#paid", d).checked,
         profile: {color: $("#c1", d).value, color2: $("#c2", d).value}}});
       toast("Saved"); render();
     } catch (e) { toast(e.message); }
+  };
+  $("#edge", d).onclick = async () => {
+    const b = $("#edge", d); b.disabled = true; b.textContent = "Reading reviews…";
+    try { const r = await api(`/api/admin/customers/${id}/edge`, {method: "POST", body: {}}); toast(`${r.report.reviews_analyzed} bad reviews analyzed`); openCustomer(id); }
+    catch (e) { toast(e.message); b.disabled = false; b.textContent = "Find their competitor edge"; }
   };
   $("#voice", d).onclick = async () => {
     const b = $("#voice", d); b.disabled = true; b.textContent = "Writing…";

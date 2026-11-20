@@ -101,7 +101,8 @@ def run_due(limit: int = 200) -> int:
     t = now()
     with db() as conn:
         due = [r["id"] for r in conn.execute(
-            "SELECT id FROM contacts WHERE seq_status = 'active' AND seq_next <= ? ORDER BY seq_next LIMIT ?",
+            "SELECT c.id FROM contacts c JOIN accounts a ON a.id = c.account_id WHERE c.seq_status = 'active' "
+            "AND c.seq_next <= ? AND a.plan_status != 'canceled' ORDER BY c.seq_next LIMIT ?",
             (t, limit)).fetchall()]
     for cid in due:
         with db() as conn:
@@ -219,7 +220,7 @@ def run_due_posts() -> int:
     with db() as conn:
         rows = conn.execute(
             "SELECT p.*, a.profile, a.email AS owner_email FROM posts p JOIN accounts a ON a.id = p.account_id "
-            "WHERE p.status = 'scheduled'").fetchall()
+            "WHERE p.status = 'scheduled' AND a.plan_status != 'canceled'").fetchall()
         for r in rows:
             prof = json.loads(r["profile"])
             try:

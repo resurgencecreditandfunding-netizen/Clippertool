@@ -10,13 +10,28 @@ One login for local service businesses. Three panels, nothing to configure per c
 
 Setup is a 10-minute guided onboarding. Everything else fills itself in from it.
 
+## Offer
+
+**$497 setup + $197/month.** The monthly fee covers platform access and continued premium support, plus your Skool community (set `STANDOUT_COMMUNITY_URL` and every active customer gets a "Community & support" button).
+
+Subscription status is set per customer in the admin dashboard, until Stripe is wired in:
+
+| Status | What the customer gets |
+|---|---|
+| Active | Everything |
+| Past due | Everything still works; a banner asks them to update their payment |
+| Canceled | App locked, funnels offline, follow-ups and scheduled posts stopped. Data is kept, so reactivating restores everything |
+
+The admin dashboard also tracks whether the $497 setup fee is paid, and shows monthly recurring revenue at a glance.
+
 ## Onboarding (what the customer sees after the setup link)
 
 1. **Brand:** paste their website. We read it and pull the logo, brand colors, font, and the words they use to describe the business. Or they upload a logo and pick colors. Every funnel page then matches their site.
 2. **Business:** trade, city, services, offer, guarantee.
-3. **Voice:** pick a tone (Friendly neighbor / Straight shooter / Polished professional), words they use and avoid, a real message they've sent a customer, and their sign-off. One click rewrites all 15 follow-up texts and emails in their voice (Claude, using the website copy + those answers). Timing, channels and fill-in fields are kept, and invented prices or promises are not allowed.
-4. **Facebook tracking:** Pixel ID + Conversions API token (3-step instructions on screen) + "what a lead is worth", then **Send test event**.
-5. **Domain (optional):** `go.theirbusiness.com`. One CNAME record, then a **Check** button.
+3. **Your edge:** we pull the 1 and 2 star Google reviews of their top local competitors (SerpApi, sorted lowest-rated first), group the complaints into themes ranked by how often they appear (no-shows, never calls back, surprise pricing, not fixed right, mess, pushy/rude, won't honor the warranty), and suggest a promise, proof and ad hook for each. The owner ticks only what they truly deliver. Confirmed promises go into funnel bullets, **competitor-gap ads**, Mistake/Offer content scripts and the voice rewrite. Competitor names and review text stay private to the owner; they never appear in public pages, ads or posts. No SerpApi key? Owners paste reviews by hand.
+4. **Voice:** pick a tone (Friendly neighbor / Straight shooter / Polished professional), words they use and avoid, a real message they've sent a customer, and their sign-off. One click rewrites all 15 follow-up texts and emails in their voice (Claude, using the website copy + those answers). Timing, channels and fill-in fields are kept, and invented prices or promises are not allowed.
+5. **Facebook tracking:** Pixel ID + Conversions API token (3-step instructions on screen) + "what a lead is worth", then **Send test event**.
+6. **Domain (optional):** `go.theirbusiness.com`. One CNAME record, then a **Check** button.
 
 Finishing builds their first 30-day content plan automatically. Everything stays editable under ⚙️ Setup.
 
@@ -87,6 +102,8 @@ Tests: `pip install pytest && python -m pytest tests`
 | `STANDOUT_ACCESS_CODE` | Anyone can sign up | Sign-up needs the code you hand out after payment |
 | `STANDOUT_CONTACT_LIMIT` | 500 | Change the plan cap |
 | `STANDOUT_DATA_DIR` | `./data` | Where the SQLite database and uploaded logos live |
+| `SERPAPI_KEY` | Owners paste competitor reviews by hand | Competitor lookup runs automatically (about 5 to 11 searches per run, limited to once an hour per customer) |
+| `STANDOUT_COMMUNITY_URL` | No community button | "Community & support" button for active customers |
 | `STANDOUT_CNAME_TARGET` | Your base host | The hostname customers point their funnel domain at |
 | `META_API_VERSION` | `v26.0` | Graph API version for the Conversions API and Page posting |
 
@@ -105,7 +122,7 @@ Demo mode (no Twilio/SMTP) is deliberate: on the live session you can submit a f
 - **Text messaging compliance:** US carriers require A2P 10DLC registration per business. Plan for one Twilio subaccount and number per customer, registered during onboarding.
 - **Email deliverability:** send through a provider (Postmark, SendGrid, SES) with your domain authenticated (SPF/DKIM).
 - **Auto-posting:** Facebook Page posting works with a Page access token. Selling it to many businesses needs a Meta app that has passed App Review (`pages_manage_posts`). Until then, the email reminder fallback works for every account.
-- **Billing:** take payment with Stripe and hand out the access code, or add Stripe subscriptions.
+- **Billing:** connect Stripe (Checkout for the $497 setup and a $197/month subscription) and let its webhook set past due or canceled automatically. Today you set the status by hand in admin.
 - **One-click Facebook connect:** today customers paste a Pixel ID and token, with on-screen steps. A "Log in with Facebook" button that picks the Pixel and creates the token automatically needs a Meta app with Business Login approved by Meta (App Review). Worth doing once you have paying customers.
 - **Privacy policy:** sending hashed customer data to Meta needs a privacy policy on the funnel pages that says so. Have one written and link it in the page footer.
 - **Missed-call text-back:** needs a Twilio voice webhook. It's the natural next feature.

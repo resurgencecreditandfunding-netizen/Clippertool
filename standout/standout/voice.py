@@ -66,6 +66,11 @@ def _clean_placeholders(text: str) -> str:
 def evidence(profile: dict) -> str:
     p = profile
     parts = [f"Tone they picked: {TONES.get(p.get('tone', ''), 'not chosen')}"]
+    from .reviews import confirmed
+    promises = confirmed(p)
+    if promises:
+        parts.append("Promises that set them apart from local competitors (weave these in where they fit, "
+                     "never mention competitors):\n" + "\n".join(f"- {d['promise']}" for d in promises))
     for key, label in (("voice_words", "Words/phrases they use"), ("voice_avoid", "Words they never use"),
                        ("signoff", "How they sign off"), ("voice_sample", "A real message they sent a customer"),
                        ("site_description", "Website description"), ("site_text", "Website copy (excerpt)")):

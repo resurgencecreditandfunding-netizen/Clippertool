@@ -240,8 +240,18 @@ def build_post(p: dict, date: dt.date, index: int, funnel_links: dict[str, str])
 
 
 def template_calendar(profile: dict, start: dt.date, days: int, funnel_links: dict[str, str]) -> list[dict]:
+    from .reviews import confirmed
     p = complete(profile)
-    return [build_post(p, start + dt.timedelta(days=i), i, funnel_links) for i in range(days)]
+    edge = confirmed(profile)
+    posts = []
+    for i in range(days):
+        post = build_post(p, start + dt.timedelta(days=i), i, funnel_links)
+        if edge and post["pillar"] in ("Mistake / Myth", "Offer"):
+            d = edge[(i // 7) % len(edge)]
+            post["script"] = post["script"].replace(
+                "\n\nCLOSE:", f"\n+ Contrast it: \"{d['hook']}\" Then your promise: \"{d['promise']}\"\n\nCLOSE:", 1)
+        posts.append(post)
+    return posts
 
 
 # ------------------------------------------------------------------ AI version
@@ -296,6 +306,12 @@ def ai_calendar(profile: dict, start: dt.date, days: int, funnel_links: dict[str
             "capi_token", "capi_test_code", "fb_verify", "timezone", "Trade"}
     profile_txt = "\n".join(f"- {k}: {v}" for k, v in p.items() if k not in skip and not k.startswith("fb_")
                             and isinstance(v, str) and len(v) < 600)
+    from .reviews import confirmed
+    edge = confirmed(profile)
+    if edge:
+        profile_txt += ("\n\nWhat local customers hate about competitors, and this owner's answer (use on Mistake/Myth "
+                        "and Offer days; never name or hint at a competitor):\n"
+                        + "\n".join(f"- {d['hook']} -> {d['promise']}" for d in edge))
     if p.get("voice_guide"):
         profile_txt += f"\n\nBrand voice (write captions and scripts in this voice):\n{p['voice_guide']}"
     slots = "\n".join(f"- {x['day']} ({dt.date.fromisoformat(x['day']).strftime('%A')}): pillar={x['pillar']}, "

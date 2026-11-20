@@ -27,6 +27,10 @@ class Settings:
         self.meta_api_version = os.environ.get("META_API_VERSION", "v26.0")
         # Hostname customers point their funnel subdomain (CNAME) at, e.g. funnels.yourbrand.com
         self.cname_target = os.environ.get("STANDOUT_CNAME_TARGET", "")
+        # Competitor review lookups (SerpApi). Without it, owners can paste reviews by hand.
+        self.serpapi_key = os.environ.get("SERPAPI_KEY", "")
+        # Your community / premium support (e.g. your Skool group). Shown to active customers.
+        self.community_url = os.environ.get("STANDOUT_COMMUNITY_URL", "")
         self.worker_interval = float(os.environ.get("STANDOUT_WORKER_SECONDS", "30"))
 
     @property
