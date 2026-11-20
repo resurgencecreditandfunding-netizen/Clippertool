@@ -202,7 +202,7 @@ worker = Worker()
 def publish_facebook(page_id: str, token: str, message: str) -> str:
     import httpx
     try:
-        r = httpx.post(f"https://graph.facebook.com/v21.0/{page_id}/feed",
+        r = httpx.post(f"https://graph.facebook.com/{settings.meta_api_version}/{page_id}/feed",
                        data={"message": message, "access_token": token}, timeout=30)
         return "posted" if r.status_code < 300 else f"failed: {r.status_code}"
     except httpx.HTTPError as e:

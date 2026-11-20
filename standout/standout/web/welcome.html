@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Welcome</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body class="auth">
+<main class="auth-card">
+  <h1 class="logo">Stand<span>Out</span></h1>
+  <h2>Welcome aboard 👋</h2>
+  <p class="muted">Pick a password and we'll walk you through setup. It takes about 10 minutes.</p>
+  <form id="f">
+    <label>New password<input name="password" type="password" required minlength="8" autocomplete="new-password"></label>
+    <p id="err" class="err" hidden></p>
+    <button class="btn primary">Set password and start</button>
+  </form>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get("t") || "";
+document.getElementById("f").onsubmit = async e => {
+  e.preventDefault();
+  const r = await fetch("/api/setup-password", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({token, password: e.target.password.value})});
+  if (r.ok) location.href = "/";
+  else { const d = await r.json().catch(() => ({})); const el = document.getElementById("err"); el.textContent = d.detail || "Something went wrong."; el.hidden = false; }
+};
+</script>
+</body></html>

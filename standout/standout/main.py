@@ -1,27 +1,37 @@
-"""Web app + API. Three panels for the owner (Content, Funnels, Leads) and public funnel pages."""
+"""Web app + API.
+
+- Owner app at /       : onboarding, then three panels (Content, Funnels, Leads) + Setup.
+- Admin app at /admin  : the program owner enrolls customers and customizes for them.
+- Public funnel pages  : /f/{slug}/{funnel}, or the customer's own domain (go.theirbusiness.com/{funnel}).
+"""
 from __future__ import annotations
 
+import base64
 import csv
 import datetime as dt
+import hashlib
+import hmac
 import io
 import json
+import re
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, automation, content, funnels
+from . import auth, automation, brand, content, funnels, meta, voice
 from .config import settings
 from .db import db, init_db, now, row
-from .profile import FIELDS, complete, missing
+from .profile import FIELDS, SYSTEM_FIELDS, complete, missing
 
 WEB = Path(__file__).resolve().parent / "web"
 STAGES = ["new", "contacted", "quoted", "won", "lost"]
+HEX6 = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 @asynccontextmanager
@@ -35,20 +45,61 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="StandOut", lifespan=lifespan)
 
 
-# ---------------------------------------------------------------- helpers
-def account_id(request: Request) -> int:
-    aid = auth.account_from_token(request.cookies.get(auth.COOKIE))
-    if not aid:
+# ---------------------------------------------------------------- custom domains
+def _base_host() -> str:
+    return settings.base_url.split("://", 1)[-1].split("/")[0].split(":")[0].lower()
+
+
+@app.middleware("http")
+async def custom_domains(request: Request, call_next):
+    """go.theirbusiness.com/ -> their Free Estimate page; go.theirbusiness.com/special -> that funnel."""
+    host = request.headers.get("host", "").split(":")[0].lower()
+    if host and host not in (_base_host(), "localhost", "127.0.0.1", "testserver"):
+        with db() as conn:
+            r = conn.execute("SELECT slug FROM accounts WHERE funnel_domain = ?", (host,)).fetchone()
+        if r:
+            path = request.scope["path"].strip("/")
+            if path.startswith("media/"):
+                return await call_next(request)
+            key = path or "estimate"
+            if key not in funnels.FUNNELS:
+                return HTMLResponse("Page not found", status_code=404)
+            request.scope["path"] = f"/f/{r['slug']}/{key}"
+            request.scope["raw_path"] = request.scope["path"].encode()
+            request.state.custom_action = f"/{key}"
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------- session helpers
+def session(request: Request) -> dict:
+    data = auth.read_token(request.cookies.get(auth.COOKIE))
+    if not data:
         raise HTTPException(401, "Not logged in")
-    return aid
+    return data
+
+
+def account_id(s: dict = Depends(session)) -> int:
+    return int(s["a"])
+
+
+def admin_id(s: dict = Depends(session)) -> int:
+    uid = int(s.get("adm") or s["a"])
+    with db() as conn:
+        r = conn.execute("SELECT is_admin FROM accounts WHERE id = ?", (uid,)).fetchone()
+    if not r or not r["is_admin"]:
+        raise HTTPException(403, "Admins only.")
+    return uid
 
 
 def load_account(conn, aid: int) -> dict:
-    a = row(conn.execute("SELECT id, email, slug, profile, created FROM accounts WHERE id = ?", (aid,)).fetchone(),
-            ("profile",))
+    a = row(conn.execute("SELECT * FROM accounts WHERE id = ?", (aid,)).fetchone(), ("profile",))
     if not a:
         raise HTTPException(401, "Account not found")
     return a
+
+
+def save_profile_dict(conn, aid: int, prof: dict) -> None:
+    conn.execute("UPDATE accounts SET profile = ? WHERE id = ?", (json.dumps(prof), aid))
 
 
 def ensure_funnels(conn, aid: int) -> None:
@@ -57,27 +108,41 @@ def ensure_funnels(conn, aid: int) -> None:
                      (aid, key, json.dumps(funnels.default_sequence(key))))
 
 
-def funnel_link(slug: str, key: str) -> str:
-    return f"{settings.base_url}/f/{slug}/{key}"
+def funnel_link(acct: dict, key: str) -> str:
+    if acct.get("funnel_domain"):
+        return f"https://{acct['funnel_domain']}/{key}"
+    return f"{settings.base_url}/f/{acct['slug']}/{key}"
 
 
-def links_for(slug: str) -> dict[str, str]:
-    return {k: funnel_link(slug, k) for k in funnels.FUNNELS}
+def limit_for(acct: dict) -> int:
+    return acct.get("contact_limit") or settings.contact_limit
 
 
 def contact_count(conn, aid: int) -> int:
     return conn.execute("SELECT COUNT(*) FROM contacts WHERE account_id = ?", (aid,)).fetchone()[0]
 
 
-def _session(aid: int) -> JSONResponse:
-    resp = JSONResponse({"ok": True})
-    resp.set_cookie(auth.COOKIE, auth.make_token(aid), max_age=auth.SESSION_DAYS * 86400,
-                    httponly=True, samesite="lax", secure=settings.base_url.startswith("https"))
+def _cookie(resp: Response, token: str) -> Response:
+    resp.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="lax",
+                    secure=settings.base_url.startswith("https"))
     return resp
+
+
+def _session(aid: int, admin: int | None = None, payload: dict | None = None) -> JSONResponse:
+    return _cookie(JSONResponse(payload or {"ok": True}), auth.make_token(aid, admin))
 
 
 def _kick_followups() -> None:
     threading.Thread(target=automation.run_due, daemon=True).start()
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def _record(conn, aid: int, funnel: str, kind: str) -> None:
+    conn.execute("INSERT INTO events (account_id, funnel, kind, day, created) VALUES (?,?,?,?,?)",
+                 (aid, funnel, kind, dt.date.today().isoformat(), now()))
 
 
 # ---------------------------------------------------------------- pages
@@ -93,7 +158,34 @@ def login_page():
     return HTMLResponse((WEB / "login.html").read_text())
 
 
+@app.get("/welcome", include_in_schema=False)
+def welcome_page():
+    return HTMLResponse((WEB / "welcome.html").read_text())
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_page(request: Request):
+    data = auth.read_token(request.cookies.get(auth.COOKIE))
+    if not data:
+        return RedirectResponse("/login", status_code=303)
+    return HTMLResponse((WEB / "admin.html").read_text())
+
+
 app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+
+@app.get("/media/{aid}/{name}", include_in_schema=False)
+def media(aid: int, name: str):
+    if not re.fullmatch(r"logo-[0-9a-f]{12}\.(png|jpg|gif|webp|svg)", name):
+        raise HTTPException(404)
+    path = settings.data_dir / "uploads" / str(aid) / name
+    if not path.is_file():
+        raise HTTPException(404)
+    types = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml"}
+    # Uploaded SVGs can carry scripts: never let them run, even if opened directly.
+    return FileResponse(path, media_type=types[name.rsplit(".", 1)[1]], headers={
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        "X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=86400"})
 
 
 # ---------------------------------------------------------------- auth
@@ -106,6 +198,11 @@ class SignupIn(BaseModel):
 
 class LoginIn(BaseModel):
     email: str
+    password: str
+
+
+class SetupIn(BaseModel):
+    token: str
     password: str
 
 
@@ -123,9 +220,21 @@ def signup(body: SignupIn):
 @app.post("/api/login")
 def login(body: LoginIn):
     try:
-        return _session(auth.login(body.email, body.password))
+        aid = auth.login(body.email, body.password)
     except auth.AuthError as e:
         raise HTTPException(400, str(e))
+    with db() as conn:
+        is_admin = conn.execute("SELECT is_admin FROM accounts WHERE id = ?", (aid,)).fetchone()["is_admin"]
+    return _session(aid, payload={"ok": True, "admin": bool(is_admin)})
+
+
+@app.post("/api/setup-password")
+def setup_password(body: SetupIn):
+    try:
+        aid = auth.redeem_setup(body.token, body.password)
+    except auth.AuthError as e:
+        raise HTTPException(400, str(e))
+    return _session(aid)
 
 
 @app.post("/api/logout")
@@ -141,36 +250,228 @@ def auth_config():
 
 
 # ---------------------------------------------------------------- profile + home
-@app.get("/api/me")
-def me(aid: int = Depends(account_id)):
-    with db() as conn:
-        a = load_account(conn, aid)
-        used = contact_count(conn, aid)
+def me_payload(conn, aid: int, s: dict | None = None) -> dict:
+    a = load_account(conn, aid)
     prof = a["profile"]
-    safe = {k: v for k, v in prof.items() if k != "fb_page_token"}
+    safe = {k: v for k, v in prof.items() if k not in ("fb_page_token", "capi_token", "site_text")}
     safe["fb_connected"] = bool(prof.get("fb_page_id") and prof.get("fb_page_token"))
+    safe["capi_connected"] = meta.connected(prof)
+    safe["has_site_text"] = bool(prof.get("site_text"))
     return {"email": a["email"], "slug": a["slug"], "profile": safe, "fields": FIELDS,
-            "missing": missing(prof), "contacts_used": used, "contact_limit": settings.contact_limit,
+            "missing": missing(prof), "onboarded": bool(a["onboarded"]), "is_admin": bool(a["is_admin"]),
+            "acting_as": bool(s and s.get("adm")), "funnel_domain": a["funnel_domain"] or "",
+            "cname_target": settings.cname_target or _base_host(),
+            "contacts_used": contact_count(conn, aid), "contact_limit": limit_for(a),
             "ai": content.ai_available(),
             "sms_live": bool(settings.twilio_sid and settings.twilio_from),
             "email_live": bool(settings.smtp_host and settings.smtp_from)}
 
 
+@app.get("/api/me")
+def me(s: dict = Depends(session)):
+    with db() as conn:
+        conn.execute("UPDATE accounts SET last_seen = ? WHERE id = ?", (now(), s["a"]))
+        return me_payload(conn, int(s["a"]), s)
+
+
+def apply_profile(prof: dict, body: dict) -> dict:
+    allowed = (set(FIELDS) - {"owner_email"}) | {"fb_page_id", "fb_page_token", "capi_token"}
+    for k, v in body.items():
+        if k not in allowed or not isinstance(v, str):
+            continue
+        v = v.strip()[:5000]
+        if k in ("fb_page_token", "capi_token") and not v:
+            continue  # blank means "keep the saved secret"
+        if k in ("color", "color2") and v and not HEX6.match(v):
+            raise HTTPException(400, "Colors must look like #1f6feb.")
+        if k == "pixel_id" and v and not meta.PIXEL_RE.match(v):
+            raise HTTPException(400, "The Pixel ID is the 15-16 digit number from Events Manager.")
+        if k == "lead_value" and v:
+            try:
+                v = str(max(0.0, float(v.replace("$", "").replace(",", ""))))
+            except ValueError:
+                raise HTTPException(400, "Lead value must be a number.")
+        prof[k] = v
+    return prof
+
+
 @app.put("/api/profile")
 def save_profile(body: dict, aid: int = Depends(account_id)):
-    allowed = set(FIELDS) | {"fb_page_id", "fb_page_token"}
     with db() as conn:
         a = load_account(conn, aid)
-        prof = a["profile"]
-        for k, v in body.items():
-            if k in allowed and isinstance(v, str):
-                if k == "fb_page_token" and not v.strip():
-                    continue  # blank means "keep the saved token"
-                prof[k] = v.strip()[:2000]
-        conn.execute("UPDATE accounts SET profile = ? WHERE id = ?", (json.dumps(prof), aid))
+        prof = apply_profile(a["profile"], body)
+        save_profile_dict(conn, aid, prof)
     return {"ok": True, "missing": missing(prof)}
 
 
+@app.post("/api/onboarding/done")
+def onboarding_done(aid: int = Depends(account_id)):
+    with db() as conn:
+        conn.execute("UPDATE accounts SET onboarded = 1 WHERE id = ?", (aid,))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- brand: website import, logo, domain, voice
+class ImportIn(BaseModel):
+    url: str
+    replace_logo: bool = True
+
+
+def import_brand(aid: int, url: str, replace_logo: bool = True) -> dict:
+    try:
+        site = brand.import_site(url)
+    except brand.FetchError as e:
+        raise HTTPException(400, str(e))
+    logo = ""
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+    if site["logo_url"] and (replace_logo or not prof.get("logo")):
+        try:
+            logo = brand.download_logo(aid, site["logo_url"])
+        except brand.FetchError:
+            logo = ""
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+        prof["website"] = site["url"]
+        prof["site_text"] = site["text"]
+        prof["site_description"] = site["description"]
+        if site["colors"]:
+            prof["color"] = site["colors"][0]
+            prof["color2"] = site["colors"][1] if len(site["colors"]) > 1 else site["colors"][0]
+        if site["font"]:
+            prof["font"] = site["font"]
+        if logo:
+            prof["logo"] = logo
+        if site["name"] and not prof.get("business"):
+            prof["business"] = site["name"]
+        save_profile_dict(conn, aid, prof)
+    return {"colors": site["colors"], "font": site["font"], "logo": logo or prof.get("logo", ""),
+            "name": site["name"], "description": site["description"], "words": len(site["text"].split())}
+
+
+@app.post("/api/brand/import")
+def brand_import(body: ImportIn, aid: int = Depends(account_id)):
+    return import_brand(aid, body.url, body.replace_logo)
+
+
+@app.post("/api/brand/logo")
+async def brand_logo(file: UploadFile = File(...), aid: int = Depends(account_id)):
+    data = await file.read(brand.MAX_IMAGE + 1)
+    try:
+        path = brand.save_logo(aid, data)
+    except brand.FetchError as e:
+        raise HTTPException(400, str(e))
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+        prof["logo"] = path
+        save_profile_dict(conn, aid, prof)
+    return {"logo": path}
+
+
+class DomainIn(BaseModel):
+    domain: str
+
+
+@app.put("/api/domain")
+def set_domain(body: DomainIn, aid: int = Depends(account_id)):
+    try:
+        d = brand.clean_domain(body.domain)
+    except brand.FetchError as e:
+        raise HTTPException(400, str(e))
+    if d and d == _base_host():
+        raise HTTPException(400, "Use your own domain, like go.yourbusiness.com")
+    with db() as conn:
+        taken = conn.execute("SELECT 1 FROM accounts WHERE funnel_domain = ? AND id != ?", (d, aid)).fetchone()
+        if d and taken:
+            raise HTTPException(400, "That domain is already connected to another account.")
+        conn.execute("UPDATE accounts SET funnel_domain = ? WHERE id = ?", (d or None, aid))
+    return {"domain": d}
+
+
+@app.get("/api/domain/check")
+def check_domain(aid: int = Depends(account_id)):
+    """Does the customer's domain point at us yet?"""
+    import socket
+    with db() as conn:
+        d = load_account(conn, aid)["funnel_domain"]
+    if not d:
+        return {"ok": False, "detail": "No domain saved."}
+    try:
+        theirs = {i[4][0] for i in socket.getaddrinfo(d, 443)}
+        ours = {i[4][0] for i in socket.getaddrinfo(settings.cname_target or _base_host(), 443)}
+    except socket.gaierror:
+        return {"ok": False, "detail": f"{d} doesn't exist in DNS yet. Add the CNAME record, then check again."}
+    if theirs & ours:
+        return {"ok": True, "detail": f"{d} points here. Your funnels are live on it."}
+    return {"ok": False, "detail": f"{d} points somewhere else. DNS changes can take up to an hour."}
+
+
+@app.get("/internal/tls-check", include_in_schema=False)
+def tls_check(domain: str = ""):
+    """For Caddy on-demand TLS: only issue certificates for domains a customer connected."""
+    with db() as conn:
+        ok = conn.execute("SELECT 1 FROM accounts WHERE funnel_domain = ?", (domain.lower(),)).fetchone()
+    return Response(status_code=200 if ok else 404)
+
+
+def generate_voice(aid: int) -> dict:
+    with db() as conn:
+        a = load_account(conn, aid)
+        ensure_funnels(conn, aid)
+        current = {r["key"]: json.loads(r["sequence"]) for r in
+                   conn.execute("SELECT key, sequence FROM funnels WHERE account_id = ?", (aid,))}
+    seqs, guide, used_ai = voice.rewrite(a["profile"], current)  # slow AI call outside any transaction
+    with db() as conn:
+        for key, seq in seqs.items():
+            conn.execute("UPDATE funnels SET sequence = ? WHERE account_id = ? AND key = ?", (json.dumps(seq), aid, key))
+        if guide:
+            prof = load_account(conn, aid)["profile"]
+            prof["voice_guide"] = guide
+            save_profile_dict(conn, aid, prof)
+    return {"used_ai": used_ai, "voice_guide": guide, "steps": sum(len(v) for v in seqs.values())}
+
+
+@app.post("/api/voice/generate")
+def voice_generate(aid: int = Depends(account_id)):
+    return generate_voice(aid)
+
+
+# ---------------------------------------------------------------- tracking (Pixel + Conversions API)
+@app.get("/api/tracking")
+def tracking_status(aid: int = Depends(account_id)):
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+        logs = [dict(r) for r in conn.execute(
+            "SELECT event, status, detail, created FROM capi_log WHERE account_id = ? ORDER BY id DESC LIMIT 25", (aid,))]
+    return {"pixel_id": prof.get("pixel_id", ""), "connected": meta.connected(prof),
+            "has_token": bool(prof.get("capi_token")), "test_code": prof.get("capi_test_code", ""),
+            "fb_verify": prof.get("fb_verify", ""), "lead_value": prof.get("lead_value", ""),
+            "api_version": settings.meta_api_version, "log": logs,
+            "events": [{"when": "Someone opens a funnel page", "sends": "PageView + ViewContent"},
+                       {"when": "Someone fills in the form", "sends": "Lead (with your lead value)"},
+                       {"when": "You move a lead to Contacted", "sends": "Contact"},
+                       {"when": "You move a lead to Quoted", "sends": "QualifiedLead"},
+                       {"when": "You move a lead to Won", "sends": "Purchase (with the job value)"}]}
+
+
+@app.post("/api/tracking/test")
+def tracking_test(request: Request, aid: int = Depends(account_id)):
+    with db() as conn:
+        prof = load_account(conn, aid)["profile"]
+    if not meta.connected(prof):
+        raise HTTPException(400, "Add your Pixel ID and Conversions API access token first.")
+    ev = meta.event("PageView", meta.new_event_id(),
+                    meta.browser_data(_client_ip(request), request.headers.get("user-agent", "")),
+                    source_url=f"{settings.base_url}/test")
+    ok, detail = meta.send_and_log(aid, prof, [ev])
+    if not ok:
+        raise HTTPException(400, f"Meta said: {detail}")
+    tip = (" It shows under Test Events in Events Manager." if prof.get("capi_test_code")
+           else " Add a test event code to see it under Test Events.")
+    return {"ok": True, "detail": f"Connected. Meta {detail} event.{tip}"}
+
+
+# ---------------------------------------------------------------- dashboard numbers
 @app.get("/api/summary")
 def summary(aid: int = Depends(account_id)):
     week_ago = now() - 7 * 86400
@@ -181,13 +482,30 @@ def summary(aid: int = Depends(account_id)):
             "new_leads": q("SELECT COUNT(*) FROM contacts WHERE account_id = ? AND stage = 'new'"),
             "leads_7d": q("SELECT COUNT(*) FROM contacts WHERE account_id = ? AND created >= ?", week_ago),
             "won_value": q("SELECT COALESCE(SUM(value),0) FROM contacts WHERE account_id = ? AND stage = 'won'"),
-            "following_up": q("SELECT COUNT(*) FROM contacts WHERE account_id = ? AND seq_status = 'active'"),
+            "following_up": q("SELECT COUNT(*) FROM contacts WHERE account_id = ? AND seq_status IN ('active','sending')"),
             "messages_7d": q("SELECT COUNT(*) FROM messages WHERE account_id = ? AND direction = 'out' AND created >= ?",
                              week_ago),
             "today_post": row(conn.execute("SELECT * FROM posts WHERE account_id = ? AND day = ? ORDER BY time LIMIT 1",
                                            (aid, today)).fetchone()),
             "posts_planned": q("SELECT COUNT(*) FROM posts WHERE account_id = ? AND day >= ?", today),
         }
+
+
+def funnel_stats(conn, aid: int) -> dict[str, dict]:
+    d7 = (dt.date.today() - dt.timedelta(days=6)).isoformat()
+    d30 = (dt.date.today() - dt.timedelta(days=29)).isoformat()
+    out = {k: {"views_7": 0, "leads_7": 0, "views_30": 0, "leads_30": 0} for k in funnels.FUNNELS}
+    for r in conn.execute("SELECT funnel, kind, day, COUNT(*) n FROM events WHERE account_id = ? AND day >= ? "
+                          "GROUP BY funnel, kind, day", (aid, d30)):
+        if r["funnel"] not in out:
+            continue
+        k = "views" if r["kind"] == "view" else "leads"
+        out[r["funnel"]][f"{k}_30"] += r["n"]
+        if r["day"] >= d7:
+            out[r["funnel"]][f"{k}_7"] += r["n"]
+    for v in out.values():
+        v["rate_30"] = round(100 * v["leads_30"] / v["views_30"], 1) if v["views_30"] else 0
+    return out
 
 
 # ---------------------------------------------------------------- funnels
@@ -203,17 +521,18 @@ def list_funnels(aid: int = Depends(account_id)):
     with db() as conn:
         a = load_account(conn, aid)
         ensure_funnels(conn, aid)
+        stats = funnel_stats(conn, aid)
         for key, tpl in funnels.FUNNELS.items():
             f = row(conn.execute("SELECT * FROM funnels WHERE account_id = ? AND key = ?", (aid, key)).fetchone(),
                     ("overrides", "sequence"))
             leads = conn.execute("SELECT COUNT(*) FROM contacts WHERE account_id = ? AND source = ?",
                                  (aid, key)).fetchone()[0]
             merged = funnels.merged(key, f["overrides"])
-            link = funnel_link(a["slug"], key)
+            link = funnel_link(a, key)
             out.append({
                 "key": key, "name": tpl["name"], "purpose": tpl["purpose"], "enabled": bool(f["enabled"]),
-                "link": link, "views": f["views"], "leads": leads,
-                "rate": round(100 * leads / f["views"], 1) if f["views"] else 0,
+                "link": link, "preview": f"/f/{a['slug']}/{key}?preview=1", "views": f["views"], "leads": leads,
+                "rate": round(100 * leads / f["views"], 1) if f["views"] else 0, "stats": stats[key],
                 "copy": {k: merged[k] for k in ("headline", "sub", "button", "thanks", "bullets")},
                 "sequence": f["sequence"] or funnels.default_sequence(key),
                 "ad": funnels.render_ad(key, a["profile"], link),
@@ -221,8 +540,7 @@ def list_funnels(aid: int = Depends(account_id)):
     return out
 
 
-@app.put("/api/funnels/{key}")
-def update_funnel(key: str, body: FunnelIn, aid: int = Depends(account_id)):
+def update_funnel_for(aid: int, key: str, body: FunnelIn) -> None:
     if key not in funnels.FUNNELS:
         raise HTTPException(404, "No such funnel")
     with db() as conn:
@@ -242,6 +560,11 @@ def update_funnel(key: str, body: FunnelIn, aid: int = Depends(account_id)):
                             "on": bool(s.get("on", True))})
             seq.sort(key=lambda s: s["delay"])
             conn.execute("UPDATE funnels SET sequence = ? WHERE account_id = ? AND key = ?", (json.dumps(seq), aid, key))
+
+
+@app.put("/api/funnels/{key}")
+def update_funnel(key: str, body: FunnelIn, aid: int = Depends(account_id)):
+    update_funnel_for(aid, key, body)
     return {"ok": True}
 
 
@@ -257,7 +580,7 @@ def reset_funnel(key: str, aid: int = Depends(account_id)):
 
 # ---------------------------------------------------------------- public funnel pages
 def _public_funnel(conn, slug: str, key: str):
-    a = row(conn.execute("SELECT id, email, slug, profile FROM accounts WHERE slug = ?", (slug,)).fetchone(), ("profile",))
+    a = row(conn.execute("SELECT * FROM accounts WHERE slug = ?", (slug,)).fetchone(), ("profile",))
     if not a or key not in funnels.FUNNELS:
         raise HTTPException(404, "Page not found")
     f = row(conn.execute("SELECT * FROM funnels WHERE account_id = ? AND key = ?", (a["id"], key)).fetchone(),
@@ -267,13 +590,33 @@ def _public_funnel(conn, slug: str, key: str):
     return a, f
 
 
+def _lead_value(prof: dict) -> float:
+    try:
+        return float(prof.get("lead_value") or 0)
+    except ValueError:
+        return 0.0
+
+
 @app.get("/f/{slug}/{key}", response_class=HTMLResponse, include_in_schema=False)
-def funnel_page(slug: str, key: str, preview: int = 0):
+def funnel_page(slug: str, key: str, request: Request, preview: int = 0, fbclid: str = ""):
     with db() as conn:
         a, f = _public_funnel(conn, slug, key)
         if not preview:
             conn.execute("UPDATE funnels SET views = views + 1 WHERE id = ?", (f["id"],))
-    return funnels.render_page(key, f["overrides"], a["profile"], f"/f/{slug}/{key}")
+            _record(conn, a["id"], key, "view")
+    prof = a["profile"]
+    name = funnels.FUNNELS[key]["name"]
+    pv, vc = meta.new_event_id(), meta.new_event_id()
+    custom = {"content_name": name, "content_category": complete(prof)["trade"]}
+    head = "" if preview else meta.pixel_script(prof.get("pixel_id", ""), [("PageView", {}, pv), ("ViewContent", custom, vc)])
+    if not preview and meta.connected(prof):
+        url = str(request.url)
+        bd = meta.browser_data(_client_ip(request), request.headers.get("user-agent", ""),
+                               meta.make_fbc(fbclid, request.cookies.get("_fbc", "")), request.cookies.get("_fbp", ""))
+        meta.send_later(a["id"], prof, [meta.event("PageView", pv, bd, source_url=url),
+                                        meta.event("ViewContent", vc, bd, custom, source_url=url)])
+    action = getattr(request.state, "custom_action", f"/f/{slug}/{key}")
+    return funnels.render_page(key, f["overrides"], prof, action, head_extra=head, fbclid=fbclid)
 
 
 @app.post("/f/{slug}/{key}", response_class=HTMLResponse, include_in_schema=False)
@@ -282,36 +625,60 @@ async def funnel_submit(slug: str, key: str, request: Request):
     get = lambda k, n=300: str(form.get(k, "")).strip()[:n]  # noqa: E731
     with db() as conn:
         a, f = _public_funnel(conn, slug, key)
-        if get("website"):  # honeypot: bots fill hidden fields
-            return funnels.render_thanks(key, f["overrides"], a["profile"], "")
-        name, phone, email = get("name", 120), get("phone", 40), get("email", 200)
-        if not name or not (phone or email):
-            raise HTTPException(400, "Please enter your name and phone number.")
-        details = "\n".join(x for x in [
-            get("service") and f"Needs: {get('service')}",
-            get("details", 2000),
-            get("friend_name") and f"Referred: {get('friend_name')} {get('friend_phone')}".strip(),
-        ] if x)
-        biz = complete(a["profile"])["business"]
-        alert = f"New lead from your {funnels.FUNNELS[key]['name']} page:\n\n{name}\n{phone}\n{email}\n\n{details}"
-        if contact_count(conn, a["id"]) >= settings.contact_limit:
-            # Over the plan limit: never lose the lead. Forward it to the owner instead of storing it.
-            automation.notify_owner(a, f"New lead (contact limit reached): {name}",
-                                    alert + f"\n\nYour {biz} account is full ({settings.contact_limit} contacts). "
-                                    "Delete old contacts or upgrade to keep leads in your pipeline.")
-            return funnels.render_thanks(key, f["overrides"], a["profile"], name.split(" ")[0])
-        t = now()
-        cid = conn.execute(
-            "INSERT INTO contacts (account_id, name, phone, email, source, details, created, updated) "
-            "VALUES (?,?,?,?,?,?,?,?)", (a["id"], name, phone, email, key, details, t, t)).lastrowid
-        automation.enroll(conn, a["id"], cid, key)
-        if get("friend_name") and get("friend_phone") and contact_count(conn, a["id"]) < settings.contact_limit:
-            conn.execute("INSERT INTO contacts (account_id, name, phone, source, details, created, updated) "
-                         "VALUES (?,?,?,?,?,?,?)", (a["id"], get("friend_name", 120), get("friend_phone", 40),
-                                                    "referral-friend", f"Referred by {name}", t, t))
-    automation.notify_owner(a, f"New lead: {name}", alert)
-    _kick_followups()
-    return funnels.render_thanks(key, f["overrides"], a["profile"], name.split(" ")[0])
+    prof = a["profile"]
+    if get("website"):  # honeypot: bots fill hidden fields
+        return funnels.render_thanks(key, f["overrides"], prof, "")
+    name, phone, email, zip_code = get("name", 120), get("phone", 40), get("email", 200), get("zip", 10)
+    if not name or not (phone or email):
+        raise HTTPException(400, "Please enter your name and phone number.")
+    details = "\n".join(x for x in [
+        get("service") and f"Needs: {get('service')}",
+        get("details", 2000),
+        zip_code and f"ZIP: {zip_code}",
+        get("friend_name") and f"Referred: {get('friend_name')} {get('friend_phone')}".strip(),
+    ] if x)
+    biz = complete(prof)["business"]
+    alert = f"New lead from your {funnels.FUNNELS[key]['name']} page:\n\n{name}\n{phone}\n{email}\n\n{details}"
+    tracking = {"fbc": meta.make_fbc(get("fbclid", 500), request.cookies.get("_fbc", "")),
+                "fbp": request.cookies.get("_fbp", "")[:200], "ip": _client_ip(request),
+                "ua": request.headers.get("user-agent", "")[:500], "url": get("page_url", 1000) or str(request.url),
+                "event_id": meta.new_event_id()}
+    stored = True
+    with db() as conn:
+        a = load_account(conn, a["id"])
+        if contact_count(conn, a["id"]) >= limit_for(a):
+            stored = False
+            cid = None
+        else:
+            t = now()
+            cid = conn.execute(
+                "INSERT INTO contacts (account_id, name, phone, email, source, details, tracking, created, updated) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (a["id"], name, phone, email, key, details, json.dumps(tracking), t, t)).lastrowid
+            automation.enroll(conn, a["id"], cid, key)
+            if get("friend_name") and get("friend_phone") and contact_count(conn, a["id"]) < limit_for(a):
+                conn.execute("INSERT INTO contacts (account_id, name, phone, source, details, created, updated) "
+                             "VALUES (?,?,?,?,?,?,?)", (a["id"], get("friend_name", 120), get("friend_phone", 40),
+                                                        "referral-friend", f"Referred by {name}", t, t))
+        _record(conn, a["id"], key, "lead")
+    if stored:
+        automation.notify_owner(a, f"New lead: {name}", alert)
+        _kick_followups()
+    else:
+        # Over the plan limit: never lose the lead. Forward it to the owner instead of storing it.
+        automation.notify_owner(a, f"New lead (contact limit reached): {name}",
+                                alert + f"\n\nYour {biz} account is full ({limit_for(a)} contacts). "
+                                "Delete old contacts or upgrade to keep leads in your pipeline.")
+    # Lead event: browser pixel on the thank-you page + server CAPI, same event_id, hashed matching.
+    match = meta.matching(email, phone, name, zip_code, external_id=f"{a['id']}:{cid}" if cid else "")
+    custom = {"content_name": funnels.FUNNELS[key]["name"], "content_category": complete(prof)["trade"],
+              "currency": "USD", "value": _lead_value(prof)}
+    head = meta.pixel_script(prof.get("pixel_id", ""), [("Lead", custom, tracking["event_id"])], advanced=match)
+    meta.send_later(a["id"], prof, [meta.event(
+        "Lead", tracking["event_id"],
+        {**match, **meta.browser_data(tracking["ip"], tracking["ua"], tracking["fbc"], tracking["fbp"])},
+        custom, source_url=tracking["url"])])
+    return funnels.render_thanks(key, f["overrides"], prof, name.split(" ")[0], head_extra=head)
 
 
 # ---------------------------------------------------------------- contacts (CRM)
@@ -344,7 +711,8 @@ class MessageIn(BaseModel):
 
 @app.get("/api/contacts")
 def list_contacts(q: str = "", stage: str = "", aid: int = Depends(account_id)):
-    sql = "SELECT * FROM contacts WHERE account_id = ?"
+    sql = "SELECT id, account_id, name, phone, email, source, stage, details, notes, value, seq_step, seq_status, " \
+          "created, updated FROM contacts WHERE account_id = ?"
     args: list = [aid]
     if stage:
         sql += " AND stage = ?"
@@ -364,8 +732,9 @@ def add_contact(body: ContactIn, aid: int = Depends(account_id)):
     if body.stage not in STAGES:
         raise HTTPException(400, "Unknown stage.")
     with db() as conn:
-        if contact_count(conn, aid) >= settings.contact_limit:
-            raise HTTPException(400, f"You've reached your {settings.contact_limit}-contact limit.")
+        a = load_account(conn, aid)
+        if contact_count(conn, aid) >= limit_for(a):
+            raise HTTPException(400, f"You've reached your {limit_for(a)}-contact limit.")
         t = now()
         cid = conn.execute(
             "INSERT INTO contacts (account_id, name, phone, email, source, stage, details, value, created, updated) "
@@ -384,6 +753,7 @@ def get_contact(cid: int, aid: int = Depends(account_id)):
         c = row(conn.execute("SELECT * FROM contacts WHERE id = ? AND account_id = ?", (cid, aid)).fetchone())
         if not c:
             raise HTTPException(404, "Contact not found")
+        c.pop("tracking", None)
         c["messages"] = [dict(m) for m in conn.execute(
             "SELECT * FROM messages WHERE contact_id = ? ORDER BY created", (cid,)).fetchall()]
     return c
@@ -392,7 +762,7 @@ def get_contact(cid: int, aid: int = Depends(account_id)):
 @app.patch("/api/contacts/{cid}")
 def update_contact(cid: int, body: ContactPatch, aid: int = Depends(account_id)):
     with db() as conn:
-        c = conn.execute("SELECT * FROM contacts WHERE id = ? AND account_id = ?", (cid, aid)).fetchone()
+        c = row(conn.execute("SELECT * FROM contacts WHERE id = ? AND account_id = ?", (cid, aid)).fetchone())
         if not c:
             raise HTTPException(404, "Contact not found")
         changes = body.model_dump(exclude_none=True)
@@ -405,6 +775,11 @@ def update_contact(cid: int, body: ContactPatch, aid: int = Depends(account_id))
         if changes.get("stage", "new") != "new":
             automation.stop(conn, cid, "lead moved")
         conn.execute("UPDATE contacts SET updated = ? WHERE id = ?", (now(), cid))
+        prof = load_account(conn, aid)["profile"]
+    new_stage = changes.get("stage")
+    if new_stage and new_stage != c["stage"]:
+        # Teach Meta which leads turn into real jobs (Contact / QualifiedLead / Purchase).
+        meta.stage_event(aid, prof, {**c, **changes}, new_stage, changes.get("value", c["value"]))
     return {"ok": True}
 
 
@@ -424,13 +799,14 @@ def message_contact(cid: int, body: MessageIn, aid: int = Depends(account_id)):
         c = conn.execute("SELECT * FROM contacts WHERE id = ? AND account_id = ?", (cid, aid)).fetchone()
         if not c:
             raise HTTPException(404, "Contact not found")
-        if body.channel == "sms":
-            status = automation.send_sms(c["phone"], body.body)
-            logged = body.body
-        else:
-            subject = body.subject or f"From {complete(a['profile'])['business']}"
-            status = automation.send_email(c["email"], subject, body.body, reply_to=a["email"])
-            logged = f"Subject: {subject}\n\n{body.body}"
+    if body.channel == "sms":
+        status = automation.send_sms(c["phone"], body.body)
+        logged = body.body
+    else:
+        subject = body.subject or f"From {complete(a['profile'])['business']}"
+        status = automation.send_email(c["email"], subject, body.body, reply_to=a["email"])
+        logged = f"Subject: {subject}\n\n{body.body}"
+    with db() as conn:
         automation.log_message(conn, aid, cid, "out", body.channel, logged, status)
         conn.execute("UPDATE contacts SET updated = ? WHERE id = ?", (now(), cid))
     return {"status": status}
@@ -455,7 +831,7 @@ async def import_contacts(request: Request, aid: int = Depends(account_id)):
     reader = csv.DictReader(io.StringIO(text))
     added = skipped = 0
     with db() as conn:
-        room = settings.contact_limit - contact_count(conn, aid)
+        room = limit_for(load_account(conn, aid)) - contact_count(conn, aid)
         t = now()
         for r in reader:
             r = {(k or "").strip().lower(): (v or "").strip() for k, v in r.items()}
@@ -506,7 +882,7 @@ def generate(body: GenerateIn, aid: int = Depends(account_id)):
         raise HTTPException(400, "Start date must look like 2026-12-01.")
     with db() as conn:
         a = load_account(conn, aid)
-    links = links_for(a["slug"])
+    links = {k: funnel_link(a, k) for k in funnels.FUNNELS}
     maker = content.ai_calendar if body.ai else content.template_calendar
     posts = maker(a["profile"], start, days, links)  # slow AI call happens outside the DB transaction
     end = (start + dt.timedelta(days=days - 1)).isoformat()
@@ -559,12 +935,137 @@ def delete_post(pid: int, aid: int = Depends(account_id)):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- admin (program owner)
+class EnrollIn(BaseModel):
+    email: str
+    business: str
+    contact_limit: Optional[int] = None
+    website: str = ""
+
+
+class AdminAccountPatch(BaseModel):
+    contact_limit: Optional[int] = None
+    profile: Optional[dict] = None
+    domain: Optional[str] = None
+    onboarded: Optional[bool] = None
+
+
+def _onboarding_steps(a: dict, has_posts: bool) -> dict:
+    p = a["profile"]
+    steps = {"Brand imported": bool(p.get("website") or p.get("logo")),
+             "Business info": not missing(p),
+             "Brand voice": bool(p.get("voice_guide") or p.get("tone")),
+             "Pixel + CAPI": meta.connected(p),
+             "Content plan": has_posts}
+    return {"steps": steps, "pct": round(100 * sum(steps.values()) / len(steps))}
+
+
+@app.get("/api/admin/customers")
+def admin_customers(adm: int = Depends(admin_id)):
+    out = []
+    month = now() - 30 * 86400
+    with db() as conn:
+        for r in conn.execute("SELECT * FROM accounts WHERE is_admin = 0 ORDER BY created DESC"):
+            a = row(r, ("profile",))
+            q = lambda sql, *x: conn.execute(sql, (a["id"], *x)).fetchone()[0]  # noqa: E731
+            has_posts = bool(q("SELECT COUNT(*) FROM posts WHERE account_id = ?"))
+            out.append({
+                "id": a["id"], "email": a["email"], "business": a["profile"].get("business", ""),
+                "trade": a["profile"].get("trade", ""), "city": a["profile"].get("city", ""),
+                "logo": a["profile"].get("logo", ""), "created": a["created"], "last_seen": a["last_seen"],
+                "onboarded": bool(a["onboarded"]), "domain": a["funnel_domain"] or "",
+                "contacts": q("SELECT COUNT(*) FROM contacts WHERE account_id = ?"), "contact_limit": limit_for(a),
+                "leads_30": q("SELECT COUNT(*) FROM events WHERE account_id = ? AND kind = 'lead' AND created >= ?", month),
+                "views_30": q("SELECT COUNT(*) FROM events WHERE account_id = ? AND kind = 'view' AND created >= ?", month),
+                "funnels_live": q("SELECT COUNT(*) FROM funnels WHERE account_id = ? AND enabled = 1"),
+                "capi_errors": q("SELECT COUNT(*) FROM capi_log WHERE account_id = ? AND status = 'error' AND created >= ?",
+                                 now() - 86400),
+                **_onboarding_steps(a, has_posts),
+            })
+    return out
+
+
+@app.post("/api/admin/customers")
+def admin_enroll(body: EnrollIn, adm: int = Depends(admin_id)):
+    """Enroll a customer: creates their account and returns a one-time setup link to send them."""
+    try:
+        aid = auth.create_account(body.email, body.business)
+    except auth.AuthError as e:
+        raise HTTPException(400, str(e))
+    with db() as conn:
+        ensure_funnels(conn, aid)
+        if body.contact_limit:
+            conn.execute("UPDATE accounts SET contact_limit = ? WHERE id = ?", (body.contact_limit, aid))
+    imported = None
+    if body.website.strip():
+        try:
+            imported = import_brand(aid, body.website)
+        except HTTPException as e:
+            imported = {"error": e.detail}
+    return {"id": aid, "setup_link": f"{settings.base_url}/welcome?t={auth.setup_token(aid)}", "brand": imported}
+
+
+@app.get("/api/admin/customers/{aid}")
+def admin_customer(aid: int, adm: int = Depends(admin_id)):
+    with db() as conn:
+        payload = me_payload(conn, aid)
+        payload["stats"] = funnel_stats(conn, aid)
+        payload["capi_log"] = [dict(r) for r in conn.execute(
+            "SELECT event, status, detail, created FROM capi_log WHERE account_id = ? ORDER BY id DESC LIMIT 10", (aid,))]
+        payload["id"] = aid
+    return payload
+
+
+@app.patch("/api/admin/customers/{aid}")
+def admin_update(aid: int, body: AdminAccountPatch, adm: int = Depends(admin_id)):
+    with db() as conn:
+        a = load_account(conn, aid)
+        if body.contact_limit is not None:
+            conn.execute("UPDATE accounts SET contact_limit = ? WHERE id = ?", (max(1, body.contact_limit), aid))
+        if body.onboarded is not None:
+            conn.execute("UPDATE accounts SET onboarded = ? WHERE id = ?", (int(body.onboarded), aid))
+        if body.profile:
+            save_profile_dict(conn, aid, apply_profile(a["profile"], body.profile))
+    if body.domain is not None:
+        set_domain(DomainIn(domain=body.domain), aid)
+    return {"ok": True}
+
+
+@app.post("/api/admin/customers/{aid}/import")
+def admin_import(aid: int, body: ImportIn, adm: int = Depends(admin_id)):
+    return import_brand(aid, body.url, body.replace_logo)
+
+
+@app.post("/api/admin/customers/{aid}/voice")
+def admin_voice(aid: int, adm: int = Depends(admin_id)):
+    return generate_voice(aid)
+
+
+@app.post("/api/admin/customers/{aid}/setup-link")
+def admin_setup_link(aid: int, adm: int = Depends(admin_id)):
+    with db() as conn:
+        load_account(conn, aid)
+    return {"setup_link": f"{settings.base_url}/welcome?t={auth.setup_token(aid)}"}
+
+
+@app.post("/api/admin/customers/{aid}/act-as")
+def admin_act_as(aid: int, adm: int = Depends(admin_id)):
+    """Open the customer's own app to customize for them. A banner shows you're acting as them."""
+    with db() as conn:
+        load_account(conn, aid)
+    return _session(aid, admin=adm)
+
+
+@app.post("/api/admin/return")
+def admin_return(s: dict = Depends(session)):
+    if not s.get("adm"):
+        raise HTTPException(400, "Not acting as a customer.")
+    adm = admin_id(s)
+    return _session(adm)
+
+
 # ---------------------------------------------------------------- inbound webhooks
 def _twilio_signed(request: Request, params: dict) -> bool:
-    import base64
-    import hashlib
-    import hmac
-
     url = settings.base_url + "/hooks/sms"
     data = url + "".join(f"{k}{params[k]}" for k in sorted(params))
     good = base64.b64encode(hmac.new(settings.twilio_token.encode(), data.encode(), hashlib.sha1).digest()).decode()

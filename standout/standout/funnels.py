@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import html
 import json
+import re
 
 from .profile import complete, fill, split
 
@@ -37,7 +38,7 @@ FUNNELS: dict[str, dict] = {
         "sequence": [
             {"delay": 0, "channel": "sms", "subject": "",
              "body": "Hi {first}, this is {owner} with {business}. Got your estimate request! "
-                     "What's a good time today or tomorrow for a quick call? Reply here or call {phone}."},
+                     "What's a good time today or tomorrow for a quick call? Reply here or call {phone}. Reply STOP to opt out."},
             {"delay": 0, "channel": "email", "subject": "We got your request, {first}",
              "body": "Hi {first},\n\nThanks for reaching out to {business}. We received your request and "
                      "will contact you shortly to set up your free estimate.\n\nNeed us sooner? Call {phone}.\n\n{owner}\n{business}"},
@@ -72,7 +73,7 @@ FUNNELS: dict[str, dict] = {
         },
         "sequence": [
             {"delay": 0, "channel": "sms", "subject": "",
-             "body": "Hi {first}! Your offer from {business} is locked in: {offer}. Want me to grab you a time this week? Reply YES."},
+             "body": "Hi {first}! Your offer from {business} is locked in: {offer}. Want me to grab you a time this week? Reply YES. (Reply STOP to opt out.)"},
             {"delay": 0, "channel": "email", "subject": "Your offer is saved: {offer}",
              "body": "Hi {first},\n\nYour offer is saved: {offer}.\n\nReply or call {phone} to book. Spots are limited this month.\n\n{owner}\n{business}"},
             {"delay": 1 * DAY, "channel": "sms", "subject": "",
@@ -101,7 +102,7 @@ FUNNELS: dict[str, dict] = {
         "sequence": [
             {"delay": 0, "channel": "sms", "subject": "",
              "body": "Hi {first}, {owner} from {business} here. We got your request and are calling you shortly. "
-                     "If it's urgent, call {phone} now."},
+                     "If it's urgent, call {phone} now. Reply STOP to opt out."},
             {"delay": 30 * 60, "channel": "sms", "subject": "",
              "body": "{first}, tried to reach you about your {trade} issue. Still need help today? Reply or call {phone}."},
             {"delay": 1 * DAY, "channel": "sms", "subject": "",
@@ -127,7 +128,7 @@ FUNNELS: dict[str, dict] = {
         },
         "sequence": [
             {"delay": 0, "channel": "sms", "subject": "",
-             "body": "Thanks so much {first}! One quick favor: would you leave us a Google review? It helps a local business a ton: {review_link}"},
+             "body": "Thanks so much {first}! One quick favor: would you leave us a Google review? It helps a local business a ton: {review_link} - {business}. Reply STOP to opt out."},
             {"delay": 3 * DAY, "channel": "email", "subject": "A quick favor, {first}?",
              "body": "Hi {first},\n\nThank you for sending a referral to {business}. If you haven't yet, a short Google review "
                      "would mean the world to us: {review_link}\n\n{owner}"},
@@ -172,19 +173,61 @@ def _e(s: str) -> str:
     return html.escape(s, quote=True)
 
 
-def render_page(key: str, overrides: dict, profile: dict, action: str) -> str:
+HEX6 = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def brand_style(p: dict) -> tuple[str, str, str, str]:
+    """(primary, accent, font css stack, extra <head> tags) from the brand profile."""
+    primary = p["color"] if HEX6.match(p.get("color", "")) and p["color"].lower() != "#000000" else "#1f6feb"
+    accent = p["color2"] if HEX6.match(p.get("color2", "")) else primary
+    font = re.sub(r"[^A-Za-z0-9 \-]", "", p.get("font", ""))[:50].strip()
+    head = ""
+    if font:
+        fam = font.replace(" ", "+")
+        head = (f'<link rel="preconnect" href="https://fonts.googleapis.com">'
+                f'<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family={fam}:wght@400;600;800&display=swap">')
+    stack = (f"'{font}'," if font else "") + "system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"
+    return primary, accent, stack, head
+
+
+def _ink(hex_color: str) -> str:
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#14181f" if (0.299 * r + 0.587 * g + 0.114 * b) > 170 else "#ffffff"
+
+
+def _brandbar(p: dict) -> str:
+    logo = p.get("logo", "")
+    img = f'<img src="{_e(logo)}" alt="{_e(p["business"])} logo">' if logo.startswith("/media/") else ""
+    return f'<header>{img}<span>{_e(p["business"])}</span></header>'
+
+
+def _verify(p: dict) -> str:
+    v = re.sub(r"[^A-Za-z0-9]", "", p.get("fb_verify", ""))[:64]
+    return f'<meta name="facebook-domain-verification" content="{v}">' if v else ""
+
+
+BASE_CSS = """*{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 {font};color:#14181f;background:#f5f7fa}}
+header{{background:var(--brand);color:var(--brand-ink);padding:12px 16px;font-weight:800;display:flex;align-items:center;gap:12px}}
+header img{{height:40px;max-width:160px;object-fit:contain;background:#fff;border-radius:6px;padding:3px}}"""
+
+
+def render_page(key: str, overrides: dict, profile: dict, action: str, head_extra: str = "",
+                fbclid: str = "") -> str:
     p = complete(profile)
     f = merged(key, overrides)
-    color = p["color"] if p["color"].startswith("#") and len(p["color"]) in (4, 7) and p["color"] != "#000000" else "#1f6feb"
+    color, accent, font, font_head = brand_style(p)
     bullets = "".join(f"<li>{_e(fill(b, p))}</li>" for b in f["bullets"])
     inputs = []
     for name in f["fields"]:
         label, kind, req = FIELD_LABELS[name]
         r = " required" if req else ""
+        auto = {"name": "name", "phone": "tel", "email": "email"}.get(name, "off")
         if kind == "textarea":
             inputs.append(f'<label>{label}<textarea name="{name}" rows="3"{r}></textarea></label>')
         else:
-            inputs.append(f'<label>{label}<input name="{name}" type="{kind}"{r}></label>')
+            inputs.append(f'<label>{label}<input name="{name}" type="{kind}" autocomplete="{auto}"{r}></label>')
+    if "zip" not in f["fields"] and key != "referral":
+        inputs.append('<label>ZIP code<input name="zip" inputmode="numeric" autocomplete="postal-code" maxlength="10"></label>')
     call = ""
     if p["phone"]:
         tel = "".join(c for c in p["phone"] if c.isdigit() or c == "+")
@@ -193,39 +236,41 @@ def render_page(key: str, overrides: dict, profile: dict, action: str) -> str:
     services = "".join(f"<span>{_e(s)}</span>" for s in split(p["services"])[:6])
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{_e(fill(f["headline"], p))} | {_e(p["business"])}</title>
+<title>{_e(fill(f["headline"], p))} | {_e(p["business"])}</title>{_verify(p)}{font_head}
 <style>
-:root{{--brand:{color}}}*{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#14181f;background:#f5f7fa}}
-header{{background:var(--brand);color:#fff;padding:14px 16px;font-weight:700}}
+:root{{--brand:{color};--brand-ink:{_ink(color)};--accent:{accent}}}{BASE_CSS.format(font=font)}
 main{{max-width:980px;margin:0 auto;padding:28px 16px;display:grid;gap:28px;grid-template-columns:1.2fr 1fr}}
 @media(max-width:760px){{main{{grid-template-columns:1fr}}}}
 h1{{font-size:clamp(28px,5vw,42px);line-height:1.1;margin:0 0 12px}}.sub{{font-size:18px;color:#3c4656}}
-ul{{padding-left:0;list-style:none}}li{{padding:6px 0 6px 28px;position:relative}}li:before{{content:"✓";position:absolute;left:0;color:var(--brand);font-weight:800}}
+ul{{padding-left:0;list-style:none}}li{{padding:6px 0 6px 28px;position:relative}}li:before{{content:"✓";position:absolute;left:0;color:var(--accent);font-weight:800}}
 .tags span{{display:inline-block;background:#fff;border:1px solid #dde3ea;border-radius:99px;padding:4px 12px;margin:0 6px 6px 0;font-size:14px}}
-form{{background:#fff;border-radius:14px;padding:22px;box-shadow:0 6px 24px rgba(20,24,31,.08);display:grid;gap:12px;align-self:start}}
+form{{background:#fff;border-radius:14px;padding:22px;box-shadow:0 6px 24px rgba(20,24,31,.08);display:grid;gap:12px;align-self:start;border-top:5px solid var(--accent)}}
 label{{display:grid;gap:4px;font-size:14px;font-weight:600}}input,textarea{{font:inherit;padding:11px;border:1px solid #c9d1db;border-radius:8px}}
-button,.call{{font:inherit;font-weight:700;background:var(--brand);color:#fff;border:0;border-radius:10px;padding:14px;cursor:pointer;text-align:center;text-decoration:none;display:block}}
-.call{{background:#14181f;margin-top:10px}}.trust{{color:#3c4656;font-size:14px}}.hp{{position:absolute;left:-5000px}}
+button,.call{{font:inherit;font-weight:700;background:var(--brand);color:var(--brand-ink);border:0;border-radius:10px;padding:14px;cursor:pointer;text-align:center;text-decoration:none;display:block}}
+.call{{background:#14181f;color:#fff;margin-top:10px}}.trust{{color:#3c4656;font-size:14px}}.hp{{position:absolute;left:-5000px}}
 footer{{text-align:center;color:#6b7686;font-size:13px;padding:24px}}
-</style></head><body><header>{_e(p["business"])}</header><main>
+</style>{head_extra}</head><body>{_brandbar(p)}<main>
 <section><h1>{_e(fill(f["headline"], p))}</h1><p class="sub">{_e(fill(f["sub"], p))}</p>
 <ul>{bullets}</ul><div class="tags">{services}</div><p class="trust">{years}</p>{call}</section>
 <form method="post" action="{_e(action)}"><strong>{_e(fill(f["button"], p))}</strong>
 {''.join(inputs)}<input class="hp" name="website" tabindex="-1" autocomplete="off">
+<input type="hidden" name="fbclid" value="{_e(fbclid)}"><input type="hidden" name="page_url" value="">
 <button type="submit">{_e(fill(f["button"], p))}</button>
-<small class="trust">By submitting you agree to receive texts and emails from {_e(p["business"])} about your request. Reply STOP to opt out.</small></form>
-</main><footer>{_e(p["business"])} · {_e(p["service_area"])}</footer></body></html>"""
+<small class="trust">By submitting you agree to receive texts and emails from {_e(p["business"])} about your request. Msg &amp; data rates may apply. Reply STOP to opt out.</small></form>
+</main><footer>{_e(p["business"])} · {_e(p["service_area"])}</footer>
+<script>document.querySelector('[name=page_url]').value=location.href.split('#')[0];</script></body></html>"""
 
 
-def render_thanks(key: str, overrides: dict, profile: dict, first: str) -> str:
+def render_thanks(key: str, overrides: dict, profile: dict, first: str, head_extra: str = "") -> str:
     p = complete(profile)
     f = merged(key, overrides)
+    color, _, font, font_head = brand_style(p)
     msg = fill(f["thanks"], {**p, "first": first or "there"})
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Thank you | {_e(p["business"])}</title>
-<style>body{{margin:0;font:18px/1.5 system-ui,sans-serif;background:#f5f7fa;color:#14181f;display:grid;place-items:center;min-height:100vh;padding:16px}}
-div{{background:#fff;border-radius:14px;padding:32px;max-width:520px;text-align:center;box-shadow:0 6px 24px rgba(20,24,31,.08)}}</style>
-</head><body><div><h1>✅ Thank you!</h1><p>{_e(msg)}</p></div></body></html>"""
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Thank you | {_e(p["business"])}</title>{font_head}
+<style>:root{{--brand:{color};--brand-ink:{_ink(color)}}}{BASE_CSS.format(font=font)}
+.box{{background:#fff;border-radius:14px;padding:32px;max-width:520px;margin:48px auto;text-align:center;box-shadow:0 6px 24px rgba(20,24,31,.08);font-size:18px}}</style>
+{head_extra}</head><body>{_brandbar(p)}<div class="box"><h1>✅ Thank you!</h1><p>{_e(msg)}</p></div></body></html>"""
 
 
 def dumps(v) -> str:

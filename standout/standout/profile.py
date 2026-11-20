@@ -19,7 +19,22 @@ FIELDS = {
     "color": "Brand color",
     "timezone": "Time zone",
     "owner_mobile": "Your mobile (for new-lead alerts)",
+    "website": "Your website",
+    "color2": "Accent color",
+    "font": "Font",
+    "tone": "Tone",
+    "voice_words": "Words and phrases you use",
+    "voice_avoid": "Words you never use",
+    "voice_sample": "A real text or email you sent a customer",
+    "signoff": "How you sign off",
+    "lead_value": "What a new lead is worth to you ($)",
+    "pixel_id": "Facebook Pixel (dataset) ID",
+    "capi_test_code": "Test event code (only while testing)",
+    "fb_verify": "Facebook domain verification code",
 }
+
+# Saved by the platform, not typed into the profile form.
+SYSTEM_FIELDS = {"logo", "site_text", "site_description", "voice_guide", "capi_token", "fb_page_id", "fb_page_token"}
 
 DEFAULTS = {
     "business": "Your Business",

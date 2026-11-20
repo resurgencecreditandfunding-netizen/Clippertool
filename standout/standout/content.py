@@ -292,8 +292,12 @@ def ai_calendar(profile: dict, start: dt.date, days: int, funnel_links: dict[str
     import anthropic
 
     p = complete(profile)
-    profile_txt = "\n".join(f"- {k}: {v}" for k, v in p.items() if k not in ("color", "owner_mobile")
-                            and not k.startswith("fb_"))
+    skip = {"color", "color2", "owner_mobile", "logo", "font", "site_text", "voice_sample", "pixel_id",
+            "capi_token", "capi_test_code", "fb_verify", "timezone", "Trade"}
+    profile_txt = "\n".join(f"- {k}: {v}" for k, v in p.items() if k not in skip and not k.startswith("fb_")
+                            and isinstance(v, str) and len(v) < 600)
+    if p.get("voice_guide"):
+        profile_txt += f"\n\nBrand voice (write captions and scripts in this voice):\n{p['voice_guide']}"
     slots = "\n".join(f"- {x['day']} ({dt.date.fromisoformat(x['day']).strftime('%A')}): pillar={x['pillar']}, "
                       f"format={x['format']}, funnel={x['funnel']}, link={funnel_links.get(x['funnel'], '')}"
                       for x in plan)

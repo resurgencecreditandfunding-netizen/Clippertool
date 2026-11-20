@@ -75,7 +75,36 @@ CREATE TABLE IF NOT EXISTS posts (
   created REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS posts_acct ON posts(account_id, day);
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  funnel TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  day TEXT NOT NULL,
+  created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_acct ON events(account_id, day);
+CREATE TABLE IF NOT EXISTS capi_log (
+  id INTEGER PRIMARY KEY,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  event TEXT NOT NULL,
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS capi_acct ON capi_log(account_id, created);
 """
+
+# Columns added after the first release. Applied once, safely, on startup.
+MIGRATIONS = [
+    "ALTER TABLE accounts ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN contact_limit INTEGER",
+    "ALTER TABLE accounts ADD COLUMN funnel_domain TEXT",
+    "ALTER TABLE accounts ADD COLUMN onboarded INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE accounts ADD COLUMN last_seen REAL",
+    "ALTER TABLE contacts ADD COLUMN tracking TEXT NOT NULL DEFAULT '{}'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS accounts_domain ON accounts(funnel_domain)",
+]
 
 _lock = threading.Lock()
 _ready = False
@@ -97,6 +126,12 @@ def init_db() -> None:
             return
         conn = connect()
         conn.executescript(SCHEMA)
+        for sql in MIGRATIONS:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):
+                    raise
         conn.commit()
         conn.close()
         _ready = True

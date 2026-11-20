@@ -23,6 +23,10 @@ class Settings:
         self.twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
         self.twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
         self.twilio_from = os.environ.get("TWILIO_FROM_NUMBER", "")
+        # Meta (Facebook) Graph API version for Conversions API + Page posting. Bump yearly.
+        self.meta_api_version = os.environ.get("META_API_VERSION", "v26.0")
+        # Hostname customers point their funnel subdomain (CNAME) at, e.g. funnels.yourbrand.com
+        self.cname_target = os.environ.get("STANDOUT_CNAME_TARGET", "")
         self.worker_interval = float(os.environ.get("STANDOUT_WORKER_SECONDS", "30"))
 
     @property

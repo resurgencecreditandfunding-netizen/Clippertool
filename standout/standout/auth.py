@@ -86,14 +86,17 @@ def login(email: str, password: str) -> int:
     return r["id"]
 
 
-def make_token(account_id: int) -> str:
-    payload = base64.urlsafe_b64encode(json.dumps(
-        {"a": account_id, "exp": int(time.time()) + SESSION_DAYS * 86400}).encode()).decode()
+def make_token(account_id: int, admin_id: int | None = None, kind: str = "session",
+               days: float = SESSION_DAYS, extra: dict | None = None) -> str:
+    data = {"a": account_id, "k": kind, "exp": int(time.time() + days * 86400), **(extra or {})}
+    if admin_id:
+        data["adm"] = admin_id  # an admin working inside a customer's account
+    payload = base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
     sig = hmac.new(_key(), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 
-def account_from_token(token: str | None) -> int | None:
+def read_token(token: str | None, kind: str = "session") -> dict | None:
     if not token or "." not in token:
         return None
     payload, sig = token.rsplit(".", 1)
@@ -104,6 +107,56 @@ def account_from_token(token: str | None) -> int | None:
         data = json.loads(base64.urlsafe_b64decode(payload.encode()))
     except ValueError:
         return None
-    if data.get("exp", 0) < time.time():
+    if data.get("exp", 0) < time.time() or data.get("k", "session") != kind:
         return None
+    return data
+
+
+def account_from_token(token: str | None) -> int | None:
+    data = read_token(token)
+    return int(data["a"]) if data else None
+
+
+# ------------------------------------------------------------------ admin + enrollment
+def set_password(account_id: int, password: str) -> None:
+    if len(password) < 8:
+        raise AuthError("Password must be at least 8 characters.")
+    salt = secrets.token_hex(16)
+    with db() as conn:
+        conn.execute("UPDATE accounts SET pw_salt = ?, pw_hash = ? WHERE id = ?", (salt, _hash(password, salt), account_id))
+
+
+def create_account(email: str, business: str, password: str | None = None, admin: bool = False) -> int:
+    """Used by the admin (enroll a customer) and the CLI (create an admin). No access code needed."""
+    email = email.strip().lower()
+    if not EMAIL_RE.match(email):
+        raise AuthError("Enter a valid email address.")
+    password = password or secrets.token_urlsafe(18)
+    salt = secrets.token_hex(16)
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM accounts WHERE email = ?", (email,)).fetchone():
+            raise AuthError("An account with that email already exists.")
+        profile = json.dumps({"business": business.strip(), "owner_email": email})
+        return conn.execute(
+            "INSERT INTO accounts (email, pw_salt, pw_hash, slug, profile, created, is_admin) VALUES (?,?,?,?,?,?,?)",
+            (email, salt, _hash(password, salt), unique_slug(conn, business or email.split("@")[0]), profile, now(),
+             int(admin))).lastrowid
+
+
+def setup_token(account_id: int) -> str:
+    """One-time link for a new customer to set their password. Dies once the password changes."""
+    with db() as conn:
+        pw = conn.execute("SELECT pw_hash FROM accounts WHERE id = ?", (account_id,)).fetchone()["pw_hash"]
+    return make_token(account_id, kind="setup", days=7, extra={"pw": pw[:16]})
+
+
+def redeem_setup(token: str, password: str) -> int:
+    data = read_token(token, kind="setup")
+    if not data:
+        raise AuthError("This setup link has expired. Ask for a new one.")
+    with db() as conn:
+        r = conn.execute("SELECT pw_hash FROM accounts WHERE id = ?", (data["a"],)).fetchone()
+    if not r or r["pw_hash"][:16] != data.get("pw"):
+        raise AuthError("This setup link was already used. Log in instead.")
+    set_password(int(data["a"]), password)
     return int(data["a"])

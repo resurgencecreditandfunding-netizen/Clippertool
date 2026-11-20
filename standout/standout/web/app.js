@@ -47,7 +47,11 @@ async function loadMe() {
   ME = await api("/api/me");
   const b = $("#banner");
   const pct = ME.contacts_used / ME.contact_limit;
-  if (ME.missing.length) {
+  if (ME.acting_as) {
+    b.innerHTML = `You're working inside <b>${esc(ME.profile.business || ME.email)}</b>'s account as an admin. <a href="#" id="backAdmin">← Back to admin</a>`;
+    b.hidden = false;
+    $("#backAdmin").onclick = async e => { e.preventDefault(); await api("/api/admin/return", {method: "POST"}); location.href = "/admin"; };
+  } else if (ME.missing.length) {
     b.innerHTML = `Finish your setup so your funnels and scripts use your real business info. <a href="#" data-go="setup">Finish setup →</a>`;
     b.hidden = false;
   } else if (pct >= .9) {
@@ -163,18 +167,34 @@ function openPost(id, posts) {
 // ------------------------------------------------------------------ FUNNELS
 let FUNNELS = [];
 async function renderFunnels() {
-  FUNNELS = await api("/api/funnels");
+  const [list, tr] = await Promise.all([api("/api/funnels"), api("/api/tracking")]);
+  FUNNELS = list;
+  const t = FUNNELS.reduce((a, f) => ({v7: a.v7 + f.stats.views_7, l7: a.l7 + f.stats.leads_7, v30: a.v30 + f.stats.views_30, l30: a.l30 + f.stats.leads_30}), {v7: 0, l7: 0, v30: 0, l30: 0});
+  const lastErr = tr.log.find(x => x.status === "error");
+  const health = !tr.pixel_id ? `<span class="chip" style="color:var(--warn)">● Facebook tracking not connected</span> <a href="#" data-go="setup">Connect →</a>`
+    : !tr.connected ? `<span class="chip" style="color:var(--warn)">● Pixel on, Conversions API token missing</span> <a href="#" data-go="setup">Finish →</a>`
+    : lastErr && (!tr.log[0] || tr.log[0].status === "error") ? `<span class="chip" style="color:var(--bad)">● Meta rejected the last event: ${esc(lastErr.detail)}</span>`
+    : `<span class="chip" style="color:var(--ok)">● Pixel + Conversions API live</span>`;
   view.innerHTML = `
   <div class="head"><div class="grow"><h1>Funnels</h1>
-    <p class="muted">Four pages that turn clicks into leads. They're already built from your business info; just turn them on and share the link.</p></div></div>
+    <p class="muted">Four pages that turn clicks into leads, built from your brand and business info. Turn them on, put the link in your ads.</p></div>
+    <div>${health}</div></div>
+  <div class="stats">
+    <div class="stat"><b>${t.v7}</b><span>Visits, last 7 days</span></div>
+    <div class="stat"><b>${t.l7}</b><span>Leads, last 7 days</span></div>
+    <div class="stat"><b>${t.v30}</b><span>Visits, last 30 days</span></div>
+    <div class="stat"><b>${t.l30}</b><span>Leads, last 30 days</span></div>
+    <div class="stat"><b>${t.v30 ? (100 * t.l30 / t.v30).toFixed(1) : 0}%</b><span>Visit → lead, 30 days</span></div>
+  </div>
   <div class="funnels">${FUNNELS.map(f => `
     <div class="card funnel">
       <div class="row"><h3 style="flex:1">${esc(f.name)}</h3>
         <label class="switch" title="Turn page on/off"><input type="checkbox" data-toggle="${f.key}" ${f.enabled ? "checked" : ""}><span></span></label></div>
       <p class="muted" style="margin:6px 0 0">${esc(f.purpose)}</p>
-      <div class="nums"><div><b>${f.views}</b><span>Visits</span></div><div><b>${f.leads}</b><span>Leads</span></div><div><b>${f.rate}%</b><span>Convert</span></div></div>
+      <div class="nums"><div><b>${f.stats.views_7}</b><span>Visits (7d)</span></div><div><b>${f.stats.leads_7}</b><span>Leads (7d)</span></div>
+        <div><b>${f.stats.leads_30}</b><span>Leads (30d)</span></div><div><b>${f.stats.rate_30}%</b><span>Convert (30d)</span></div></div>
       <div class="link"><input readonly value="${esc(f.link)}"><button class="btn small" data-copy="${esc(f.link)}">Copy</button></div>
-      <div class="row" style="margin-top:10px"><a class="btn small" target="_blank" href="${esc(f.link)}?preview=1">View page ↗</a>
+      <div class="row" style="margin-top:10px"><a class="btn small" target="_blank" href="${esc(f.preview)}">View page ↗</a>
         <button class="btn small primary" data-open="${f.key}">Edit · Follow-up · Ad</button></div>
     </div>`).join("")}</div>`;
   view.querySelectorAll("[data-copy]").forEach(b => b.onclick = () => copy(b.dataset.copy, "Link copied"));
@@ -212,7 +232,7 @@ function openFunnel(key, sub) {
         <label>Bullet points (one per line)<textarea id="cB" rows="4">${esc(c.bullets.join("\n"))}</textarea></label>
         <label>Button<input id="cBtn" value="${esc(c.button)}"></label>
         <label>Thank-you message<input id="cT" value="${esc(c.thanks)}"></label>
-        <div class="row"><button class="btn primary" id="saveCopy">Save page</button><a class="btn" target="_blank" href="${esc(f.link)}?preview=1">Preview ↗</a></div>`;
+        <div class="row"><button class="btn primary" id="saveCopy">Save page</button><a class="btn" target="_blank" href="${esc(f.preview)}">Preview ↗</a></div>`;
     },
     ad() {
       const a = f.ad;
@@ -350,40 +370,210 @@ async function openLead(id) {
   };
 }
 
-// ------------------------------------------------------------------ SETUP
+// ------------------------------------------------------------------ SETUP + ONBOARDING
+// Each section renders its fields and wires its own buttons. Onboarding walks them as steps;
+// Setup shows them all on one page for small adjustments later.
+const TONES = [["friendly", "Friendly neighbor", "Warm, casual, first names, a little personality."],
+  ["straight", "Straight shooter", "Short and direct. No fluff."],
+  ["professional", "Polished professional", "Courteous, clear and reassuring."]];
+const fieldInput = (k, type = "text", hint = "") => {
+  const p = ME.profile, req = ME.missing.includes(k) ? " *" : "";
+  return `<label>${esc(ME.fields[k] || k)}${req}<input name="${k}" type="${type}" value="${esc(p[k] || "")}" ${hint ? `placeholder="${esc(hint)}"` : ""}></label>`;
+};
+const fieldArea = (k, rows = 2, hint = "") => `<label>${esc(ME.fields[k] || k)}${ME.missing.includes(k) ? " *" : ""}<textarea name="${k}" rows="${rows}" ${hint ? `placeholder="${esc(hint)}"` : ""}>${esc(ME.profile[k] || "")}</textarea></label>`;
+async function saveSection(el) {
+  const body = {};
+  el.querySelectorAll("[name]").forEach(i => { if (i.type === "radio") { if (i.checked) body[i.name] = i.value; } else body[i.name] = i.value; });
+  const r = await api("/api/profile", {method: "PUT", body});
+  await loadMe();
+  return r;
+}
+
+const SECTIONS = {
+  brand: {
+    title: "Your brand", intro: "Paste your website and we'll pull your logo, colors and the way you describe your business. Your funnels will look like your site.",
+    html: () => {
+      const p = ME.profile;
+      return `<div class="row"><input id="siteUrl" placeholder="yourbusiness.com" value="${esc(p.website || "")}" style="flex:1;min-width:220px">
+          <button class="btn primary" id="doImport" type="button">Import my brand</button></div>
+        <p id="impMsg" class="muted" style="margin:0"></p>
+        <div class="brandrow">
+          <div class="logobox">${p.logo ? `<img src="${esc(p.logo)}" alt="Logo">` : `<span class="muted">No logo yet</span>`}</div>
+          <div style="display:grid;gap:8px"><label>Upload a logo (PNG, JPG, SVG · under 2 MB)<input type="file" id="logoFile" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"></label></div>
+        </div>
+        <div class="grid2"><label>Main color<input name="color" type="color" value="${esc(p.color || "#1f6feb")}"></label>
+          <label>Accent color<input name="color2" type="color" value="${esc(p.color2 || p.color || "#1f6feb")}"></label></div>
+        ${fieldInput("font", "text", "e.g. Montserrat (any Google Font)")}`;
+    },
+    wire: el => {
+      $("#doImport", el).onclick = async () => {
+        const btn = $("#doImport", el); btn.disabled = true; btn.textContent = "Reading your site…";
+        try {
+          const r = await api("/api/brand/import", {method: "POST", body: {url: $("#siteUrl", el).value}});
+          await loadMe();
+          $("#impMsg", el).textContent = `Found ${r.colors.length} brand color${r.colors.length === 1 ? "" : "s"}${r.font ? `, the ${r.font} font` : ""}${r.logo ? ", your logo" : ""} and ${r.words} words about your business.`;
+          rerender(el, "brand");
+        } catch (e) { $("#impMsg", el).textContent = e.message; }
+        btn.disabled = false; btn.textContent = "Import my brand";
+      };
+      $("#logoFile", el).onchange = async e => {
+        const fd = new FormData(); fd.append("file", e.target.files[0]);
+        const r = await fetch("/api/brand/logo", {method: "POST", body: fd});
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return toast(d.detail || "Upload failed");
+        await loadMe(); toast("Logo saved"); rerender(el, "brand");
+      };
+    },
+  },
+  business: {
+    title: "Your business", intro: "Used in every funnel, ad, script and follow-up message.",
+    html: () => `<div class="grid2">${fieldInput("business")}${fieldInput("owner")}${fieldInput("trade", "text", "plumbing, HVAC, roofing…")}${fieldInput("city")}
+        ${fieldInput("service_area")}${fieldInput("phone", "tel")}${fieldInput("years")}${fieldInput("review_link", "url")}</div>
+      ${fieldArea("services", 2, "water heaters, drain cleaning, leak repair")}${fieldArea("problems", 2, "What do people call you about?")}
+      ${fieldArea("ideal_customer")}${fieldInput("offer", "text", "$50 off your first service")}${fieldArea("guarantee")}${fieldArea("difference")}`,
+  },
+  voice: {
+    title: "Your voice", intro: "Your follow-up texts and emails should sound like you, not a robot. Tell us how you talk and we'll rewrite every message in your voice.",
+    html: () => {
+      const p = ME.profile;
+      return `<div class="tones">${TONES.map(([k, n, d]) => `<label class="tone"><input type="radio" name="tone" value="${k}" ${p.tone === k ? "checked" : ""}><b>${n}</b><span>${d}</span></label>`).join("")}</div>
+        ${fieldInput("voice_words", "text", "e.g. no-brainer, folks, we'll take care of you")}
+        ${fieldInput("voice_avoid", "text", "e.g. synergy, cheap, ASAP")}
+        ${fieldArea("voice_sample", 4, "Paste a text or email you've actually sent a customer. This is the best clue to how you sound.")}
+        ${fieldInput("signoff", "text", "e.g. Talk soon, / Thanks again,")}
+        <p class="muted" style="margin:0;font-size:13px">${p.has_site_text ? "✓ We'll also use the words from your website." : "Tip: import your website in the Brand step so we can learn from it too."}</p>
+        <div class="row"><button class="btn primary" id="doVoice" type="button">✍️ Write my follow-up in my voice</button><span id="voiceMsg" class="muted"></span></div>
+        ${p.voice_guide ? `<div class="card" style="box-shadow:none"><b>Your brand voice</b><pre style="margin-top:6px">${esc(p.voice_guide)}</pre></div>` : ""}`;
+    },
+    wire: el => {
+      $("#doVoice", el).onclick = async () => {
+        const btn = $("#doVoice", el); btn.disabled = true; btn.textContent = ME.ai ? "Writing in your voice… (about a minute)" : "Updating…";
+        try {
+          await saveSection(el);
+          const r = await api("/api/voice/generate", {method: "POST"});
+          await loadMe();
+          toast(r.used_ai ? `Rewrote ${r.steps} messages in your voice` : `Updated ${r.steps} messages`);
+          rerender(el, "voice");
+          if (!r.used_ai) $("#voiceMsg", el).textContent = "Applied your greeting and sign-off. A full rewrite in your voice turns on when AI is enabled for the platform.";
+        } catch (e) { toast(e.message); btn.disabled = false; }
+      };
+    },
+  },
+  tracking: {
+    title: "Facebook tracking", intro: "Connect your Pixel and the Conversions API so Facebook sees every lead, even with ad blockers and iPhones. Facebook then finds more people like your real customers, and your cost per lead drops.",
+    html: () => {
+      const p = ME.profile;
+      return `<ol class="howto">
+          <li>Open <b>Meta Events Manager</b>, then pick your dataset (Pixel). Copy its <b>ID</b>.</li>
+          <li>Go to <b>Settings → Conversions API → Generate access token</b>. Copy the token.</li>
+          <li>Paste both below and press <b>Send test event</b>.</li></ol>
+        <div class="grid2">${fieldInput("pixel_id", "text", "15-16 digits")}
+          <label>Conversions API access token<input name="capi_token" type="password" placeholder="${p.capi_connected ? "Saved (leave blank to keep)" : "Paste token"}"></label>
+          ${fieldInput("lead_value", "text", "e.g. 40")}${fieldInput("capi_test_code", "text", "TEST12345 (remove when live)")}</div>
+        ${fieldInput("fb_verify", "text", "From Business Settings → Brand Safety → Domains")}
+        <div class="row"><button class="btn primary" id="doTest" type="button">Save and send test event</button><span id="testMsg" class="muted"></span></div>
+        <details><summary style="cursor:pointer;font-weight:600">What gets sent to Facebook</summary><div id="evMap" class="muted">Loading…</div></details>`;
+    },
+    wire: async el => {
+      $("#doTest", el).onclick = async () => {
+        try { await saveSection(el); const r = await api("/api/tracking/test", {method: "POST"}); $("#testMsg", el).textContent = "✓ " + r.detail; }
+        catch (e) { $("#testMsg", el).textContent = e.message; }
+      };
+      const tr = await api("/api/tracking");
+      $("#evMap", el).innerHTML = `<table class="tbl">${tr.events.map(x => `<tr><td>${esc(x.when)}</td><td><b>${esc(x.sends)}</b></td></tr>`).join("")}</table>
+        <p>Every event goes from the browser (Pixel) and from our server (Conversions API) with the same ID, so Facebook counts it once. Customer details are hashed before they leave our server.</p>
+        ${tr.log.length ? `<b>Recent sends</b><table class="tbl">${tr.log.slice(0, 8).map(x => `<tr><td>${esc(x.event)}</td><td style="color:${x.status === "ok" ? "var(--ok)" : "var(--bad)"}">${esc(x.status)}</td><td>${esc(x.detail)}</td><td>${ago(x.created)}</td></tr>`).join("")}</table>` : ""}`;
+    },
+  },
+  domain: {
+    title: "Your domain", intro: "Run your funnels on your own web address, like go.yourbusiness.com. Optional; your funnels already work without it.",
+    html: () => `<div class="row"><input id="domIn" placeholder="go.yourbusiness.com" value="${esc(ME.funnel_domain)}" style="flex:1;min-width:220px">
+        <button class="btn" id="doDom" type="button">Save domain</button><button class="btn" id="chkDom" type="button">Check</button></div>
+      <p id="domMsg" class="muted" style="margin:0"></p>
+      <div class="card" style="box-shadow:none"><b>One DNS record, wherever you bought your domain:</b>
+        <table class="tbl"><tr><td>Type</td><td><b>CNAME</b></td></tr><tr><td>Name / Host</td><td><b>${esc((ME.funnel_domain || "go.yourbusiness.com").split(".")[0])}</b></td></tr>
+        <tr><td>Points to</td><td><b>${esc(ME.cname_target)}</b></td></tr></table></div>`,
+    wire: el => {
+      $("#doDom", el).onclick = async () => {
+        try { const r = await api("/api/domain", {method: "PUT", body: {domain: $("#domIn", el).value}}); await loadMe(); toast(r.domain ? "Domain saved" : "Domain removed"); rerender(el, "domain"); }
+        catch (e) { $("#domMsg", el).textContent = e.message; }
+      };
+      $("#chkDom", el).onclick = async () => { const r = await api("/api/domain/check"); $("#domMsg", el).textContent = (r.ok ? "✓ " : "") + r.detail; };
+    },
+  },
+  alerts: {
+    title: "Alerts and posting", intro: "Where we tell you about new leads, and how scheduled posts go out.",
+    html: () => {
+      const p = ME.profile;
+      return `<div class="grid2">${fieldInput("owner_mobile", "tel")}<label>${esc(ME.fields.timezone)}<select name="timezone">${["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"]
+        .map(z => `<option ${z === p.timezone ? "selected" : ""}>${z}</option>`).join("")}</select></label></div>
+        <details><summary style="cursor:pointer;font-weight:600">Auto-post to your Facebook Page (optional) ${p.fb_connected ? "✓ connected" : ""}</summary>
+        <div class="grid2" style="margin-top:10px"><label>Page ID<input name="fb_page_id" value="${esc(p.fb_page_id || "")}"></label>
+        <label>Page access token<input name="fb_page_token" type="password" placeholder="${p.fb_connected ? "Saved (leave blank to keep)" : ""}"></label></div></details>
+        <small class="muted">Texting: ${ME.sms_live ? "live" : "demo mode (logged, not sent)"} · Email: ${ME.email_live ? "live" : "demo mode (logged, not sent)"} · AI writing: ${ME.ai ? "on" : "off (built-in templates)"}</small>`;
+    },
+  },
+};
+function sectionCard(key, withSave = true) {
+  const s = SECTIONS[key];
+  return `<section class="card setup" data-sec="${key}"><h2>${s.title}</h2><p class="muted">${s.intro}</p><div class="secbody">${s.html()}</div>
+    ${withSave ? `<div class="row"><button class="btn primary" data-save="${key}" type="button">Save</button></div>` : ""}</section>`;
+}
+function rerender(el, key) {
+  const card = el.closest("[data-sec]") || el;
+  $(".secbody", card).innerHTML = SECTIONS[key].html();
+  SECTIONS[key].wire?.(card);
+}
+
 async function renderSetup() {
   await loadMe();
-  const p = ME.profile, f = ME.fields;
-  const input = (k, type = "text") => `<label>${esc(f[k] || k)}${ME.missing.includes(k) ? " *" : ""}<input name="${k}" type="${type}" value="${esc(p[k] || (type === "color" ? "#1f6feb" : ""))}"></label>`;
-  const area = k => `<label>${esc(f[k])}${ME.missing.includes(k) ? " *" : ""}<textarea name="${k}" rows="2">${esc(p[k] || "")}</textarea></label>`;
-  view.innerHTML = `
-  <div class="head"><div class="grow"><h1>Setup</h1><p class="muted">Fill this in once. Your funnels, scripts, ads and follow-up messages all use it.</p></div></div>
-  <form id="prof" class="card" style="display:grid;gap:12px">
-    <h3>Your business</h3>
-    <div class="grid2">${input("business")}${input("owner")}${input("trade")}${input("city")}${input("service_area")}${input("phone", "tel")}${input("years")}${input("color", "color")}</div>
-    ${area("services")}${area("problems")}${area("ideal_customer")}
-    <h3>Your offer and promise</h3>
-    ${input("offer")}${area("guarantee")}${area("difference")}${input("review_link", "url")}
-    <h3>Alerts and posting</h3>
-    <div class="grid2">${input("owner_mobile", "tel")}<label>${esc(f.timezone)}<select name="timezone">${["America/New_York", "America/Chicago", "America/Denver", "America/Phoenix", "America/Los_Angeles", "America/Anchorage", "Pacific/Honolulu"]
-      .map(z => `<option ${z === p.timezone ? "selected" : ""}>${z}</option>`).join("")}</select></label></div>
-    <details><summary style="cursor:pointer;font-weight:600">Connect your Facebook Page (optional) ${p.fb_connected ? "✓ connected" : ""}</summary>
-      <div class="grid2" style="margin-top:10px"><label>Page ID<input name="fb_page_id" value="${esc(p.fb_page_id || "")}"></label>
-      <label>Page access token<input name="fb_page_token" type="password" placeholder="${p.fb_connected ? "Saved (leave blank to keep)" : ""}"></label></div></details>
-    <div class="row"><button class="btn primary">Save</button>
-      <small class="muted">Texting: ${ME.sms_live ? "live" : "demo mode (logged, not sent)"} · Email: ${ME.email_live ? "live" : "demo mode (logged, not sent)"} · AI scripts: ${ME.ai ? "on" : "templates"}</small></div>
-  </form>`;
-  $("#prof").onsubmit = async e => {
-    e.preventDefault();
-    const r = await api("/api/profile", {method: "PUT", body: Object.fromEntries(new FormData(e.target))});
-    await loadMe(); toast(r.missing.length ? "Saved. A few fields are still missing (*)" : "Saved. Everything is up to date");
+  view.innerHTML = `<div class="head"><div class="grow"><h1>Setup</h1><p class="muted">Change anything here and your funnels, scripts and messages update with it.</p></div>
+    <a class="btn" href="#" id="rerun">Run the setup guide again</a></div>
+    <div style="display:grid;gap:16px">${Object.keys(SECTIONS).map(k => sectionCard(k)).join("")}</div>`;
+  view.querySelectorAll("[data-sec]").forEach(el => SECTIONS[el.dataset.sec].wire?.(el));
+  view.querySelectorAll("[data-save]").forEach(b => b.onclick = async () => {
+    try { const r = await saveSection(b.closest("[data-sec]")); toast(r.missing.length ? "Saved. A few required fields are still empty (*)" : "Saved"); }
+    catch (e) { toast(e.message); }
+  });
+  $("#rerun").onclick = e => { e.preventDefault(); runOnboarding(0); };
+}
+
+const STEPS = ["brand", "business", "voice", "tracking", "domain"];
+async function runOnboarding(i = 0) {
+  await loadMe();
+  document.querySelector(".top nav").style.visibility = "hidden";
+  const key = STEPS[i];
+  view.innerHTML = `<div class="wizard">
+    <div class="dots">${STEPS.map((k, j) => `<span class="${j < i ? "done" : j === i ? "on" : ""}">${j + 1}. ${SECTIONS[k].title}</span>`).join("")}</div>
+    ${sectionCard(key, false)}
+    <div class="row"><button class="btn" id="back" ${i === 0 ? "hidden" : ""}>← Back</button><span style="flex:1"></span>
+      ${["tracking", "domain"].includes(key) ? `<button class="btn" id="skip">Skip for now</button>` : ""}
+      <button class="btn primary" id="next">${i === STEPS.length - 1 ? "Finish and build my month →" : "Save and continue →"}</button></div></div>`;
+  const el = $("[data-sec]", view);
+  SECTIONS[key].wire?.(el);
+  const advance = async () => {
+    if (i < STEPS.length - 1) return runOnboarding(i + 1);
+    $("#next").disabled = true; $("#next").textContent = "Building your first month…";
+    await api("/api/onboarding/done", {method: "POST"});
+    await api("/api/content/generate", {method: "POST", body: {ai: ME.ai, days: 30}}).catch(() => null);
+    document.querySelector(".top nav").style.visibility = "";
+    await loadMe(); toast("You're all set"); show("content");
   };
+  $("#next").onclick = async () => {
+    try {
+      if (key !== "domain") { const r = await saveSection(el); if (key === "business" && r.missing.length) return toast("Fill in the fields marked *"); }
+      advance();
+    } catch (e) { toast(e.message); }
+  };
+  $("#skip") && ($("#skip").onclick = advance);
+  $("#back").onclick = () => runOnboarding(i - 1);
 }
 
 // ------------------------------------------------------------------ boot
 (async () => {
   await loadMe();
+  if (!ME.onboarded && !ME.acting_as) return runOnboarding(0);
   let start = "content";
   try { start = localStorage.getItem("tab") || start; } catch {}
-  show(ME.missing.length > 3 ? "setup" : start);
+  show(start);
 })();
